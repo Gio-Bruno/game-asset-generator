@@ -289,6 +289,36 @@ fn generated_animation_extracts_six_frames_and_replays_one_job() {
 }
 
 #[test]
+fn clipped_generated_animation_preserves_source_without_exporting_a_clip() {
+    let mut api = Api::new("animation-clipped");
+    let project = api.project();
+    let character = api.call(
+        "characters/create",
+        json!({"projectId":project,"name":"Mira","description":"Forest scout"}),
+    )["result"]["id"]
+        .clone();
+    let request = json!({"projectId":project,"characterId":character,"idempotencyKey":"clipped-1","config":{"name":"Attack","motion":"ATTACK","frameWidth":16,"frameHeight":16}});
+    let clip = api.call("animations/create", request.clone())["result"].clone();
+    let id = clip["id"].as_str().unwrap();
+    let job = api.wait(id);
+    assert_eq!(job["status"], "FAILED");
+    assert_eq!(job["error"]["code"], "CLIPPED_ANIMATION_FRAME");
+    assert_eq!(job["assetIds"].as_array().unwrap().len(), 1);
+    let clip = api.call("animations/get", json!({"id":id}))["result"].clone();
+    assert!(clip["frames"].as_array().unwrap().is_empty());
+    assert_eq!(clip["sourceAssetId"], job["assetIds"][0]);
+    let asset = api.call("assets/get", json!({"id":clip["sourceAssetId"]}))["result"].clone();
+    assert!(std::path::Path::new(asset["path"].as_str().unwrap()).exists());
+    let export = api._tmp.path().join("clipped.zip");
+    assert_eq!(
+        api.call("animations/export", json!({"id":id,"path":export}))["error"]["code"],
+        "VALIDATION_ERROR"
+    );
+    assert!(!export.exists());
+    assert_eq!(api.call("animations/create", request)["result"]["id"], id);
+}
+
+#[test]
 fn guide_animation_uses_the_shared_generation_budget() {
     let mut api = Api::new("guide-animation");
     let started=api.call("assistant/message",json!({"requestId":"animate-guide","message":"Make a forest scout and a walk cycle","allowGeneration":true}));

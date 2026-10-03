@@ -62,7 +62,7 @@ pub fn motion_direction(motion: Motion) -> &'static str {
 }
 pub(crate) fn sheet_direction(config: &AnimationConfig) -> String {
     format!(
-        "SPRITE ANIMATION: {}. {}\nExactly {} sequential frames in a {} column × {} row grid. Read left to right, top to bottom. Every cell is {} × {} target pixels. No gutters, borders, labels, shadows outside the cell, or frame numbers. Leave trailing cells empty. Keep identical character scale, camera, face, costume, palette and pivot across all frames. Place each character at the center of its cell with a shared foot baseline and safe margins. Poses must visibly advance through the motion; do not repeat a static portrait. Render one transparent atlas, not separate images. The clip plays at {} FPS; {}.",
+        "SPRITE ANIMATION: {}. {}\nExactly {} sequential frames in a {} column × {} row grid. Read left to right, top to bottom. Every cell is {} × {} target pixels. No gutters, borders, labels, shadows outside the cell, or frame numbers. Leave trailing cells empty. Keep identical character scale, camera, face, costume, palette and pivot across all frames. Place each character at the center of its cell with a shared foot baseline at 85% of the cell height. Reserve at least 10% fully transparent padding on ALL FOUR sides of EVERY cell. The entire character, feet, weapon and effects must fit inside the central 80% of its cell; choose one scale that fits the widest attack pose and use that scale throughout. Never let pixels cross or touch cell boundaries. Poses must visibly advance through the motion; do not repeat a static portrait. Render one transparent atlas, not separate images. The clip plays at {} FPS; {}.",
         config.name,
         motion_direction(config.motion),
         config.frame_count,
@@ -420,8 +420,17 @@ pub(crate) fn normalize_grid(
                 "The source sheet is smaller than its frame grid.",
             ));
         }
-        let cell = source
-            .crop_imm(x, y, w, h)
+        let source_cell = source.crop_imm(x, y, w, h).to_rgba8();
+        if touches_cell_edge(&source_cell) {
+            return Err(ApiError::new(
+                "CLIPPED_ANIMATION_FRAME",
+                format!(
+                    "Frame {} touches its grid boundary and may be clipped. The source sheet is saved. Generate again with more transparent padding, or use animations/setup to choose the grid deliberately.",
+                    index + 1
+                ),
+            ));
+        }
+        let cell = image::DynamicImage::ImageRgba8(source_cell)
             .resize(cfg.frame_width, cfg.frame_height, filter)
             .to_rgba8();
         image::imageops::overlay(
@@ -436,6 +445,26 @@ pub(crate) fn normalize_grid(
         .write_to(&mut result, image::ImageFormat::Png)
         .map_err(ApiError::storage)?;
     Ok(result.into_inner())
+}
+
+// Ignore isolated antialiasing/noise pixels, but reject a visible silhouette that
+// reaches a generated cell's boundary. Padding cannot restore already cut art.
+fn touches_cell_edge(cell: &image::RgbaImage) -> bool {
+    fn visible_run(pixels: impl Iterator<Item = u8>) -> bool {
+        let mut run = 0;
+        for alpha in pixels {
+            run = if alpha > 32 { run + 1 } else { 0 };
+            if run >= 3 {
+                return true;
+            }
+        }
+        false
+    }
+    let (w, h) = cell.dimensions();
+    visible_run((0..w).map(|x| cell.get_pixel(x, 0)[3]))
+        || visible_run((0..w).map(|x| cell.get_pixel(x, h - 1)[3]))
+        || visible_run((0..h).map(|y| cell.get_pixel(0, y)[3]))
+        || visible_run((0..h).map(|y| cell.get_pixel(w - 1, y)[3]))
 }
 
 fn export_zip(clip: &Animation, atlas: &Asset, path: &Path) -> Result<()> {

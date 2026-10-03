@@ -1,5 +1,17 @@
 # Current verification
 
+## Animation QA after v0.1.1
+
+Tested on 2026-10-03 with the real Codex app-server, Forge chat and Gravebound Raider's individual PNG. The Mac was locked and the running app held the default workspace lease, so the test used a separate local workspace seeded through the API with the existing game's style, subject description and original image. No existing game data was changed. Native playback controls and Windows interaction were not exercised.
+
+- Forge chat queued one `ATTACK` clip: six frames, three columns, 256 × 256 cells, 8 FPS, non-looping, pinned original identity. The first render was accepted by v0.1.1, extracted six distinct RGBA frames and exported a valid ZIP. Visual inspection found boundary clipping and a changing foot baseline, so the animation did **not** pass visual quality review.
+- Playback timing changed to 12 FPS/loop and returned to 8 FPS/play once without creating jobs or changing the generation snapshot. Replaying the exact animation request returned the same job. ZIP CRC, nine entries, 768 × 512 atlas, six PNG frames, frame rectangles and 125 ms JSON timing all passed. Export refused to overwrite an existing file. The GIF has six frames and 120 ms delays because GIF quantizes time to centiseconds; PNG playback and JSON retain the requested 8 FPS.
+- Generated sheets now reject a visible run of pixels at any cell edge as `CLIPPED_ANIMATION_FRAME`, before extraction. The source image remains saved and available for deliberate grid setup. The prompt requests consistent scale and explicit transparent padding around each pose. This guard only checks borders; motion continuity, alignment and background quality still require visual review. Explicitly imported sheet grids are unchanged.
+- A second real render with smaller requested poses and larger padding failed this new border check. Its source contained unwanted background haze reaching the cell edges. Its PNG was preserved; no completed frames, preview or downloadable clip were created. There were exactly two deliberate image generation requests, with no automatic retry.
+- All 38 macOS tests pass (22 core and 16 Unix subprocess integration tests), including the new clipped-output/source-preservation/export-refusal regression. Workspace formatting and strict Clippy pass. These fixes are newer than the published v0.1.1 installers; existing release artifacts were not replaced.
+
+Local QA files are under `target/animation-qa/`: requests, API responses, pixel bounds, a reviewed test ZIP and `verified-result.json`. The test ZIP is evidence of the pipeline and retains the known visual flaws; it is not an approved production animation.
+
 ## Published v0.1.1 evidence
 
 Published manually on 2026-10-03 from source `ae589433842662c3f1cb226d44ca3e108940d986`, with annotated tag `v0.1.1` and the `release/0.1` branch at that source. The [public release](https://github.com/Gio-Bruno/game-asset-generator/releases/tag/v0.1.1) includes both installers, both portable ZIPs and SHA-256 checksums. The original v0.1.0 tag and artifacts are unchanged. GitHub Actions remains disabled; no CI/CD was added.

@@ -24,13 +24,16 @@ def emit(value):
 def chunk(name, data):
     return struct.pack(">I", len(data)) + name + data + struct.pack(">I", zlib.crc32(name + data))
 pixels = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 2, 2, 8, 6, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(b"\x00" + bytes([30, 90, 70, 128]) * 2 + b"\x00" + bytes([30, 90, 70, 128]) * 2)) + chunk(b"IEND", b"")
-if mode in ("animation","guide-animation"):
+if mode in ("animation","guide-animation","animation-clipped"):
     rows=[]
     for y in range(32):
         row=bytearray([0])
         for x in range(48):
             cell=(y//16)*3+x//16
-            row.extend([30+cell*30,90,70,0 if x%16==0 or y%16==0 else 255])
+            alpha=0 if x%16<2 or x%16>=14 or y%16<2 or y%16>=14 else 255
+            if mode=="animation-clipped" and cell==0 and y==15 and 5<=x<=10:
+                alpha=255
+            row.extend([30+cell*30,90,70,alpha])
         rows.append(row)
     pixels=b"\x89PNG\r\n\x1a\n"+chunk(b"IHDR",struct.pack(">IIBBBBB",48,32,8,6,0,0,0))+chunk(b"IDAT",zlib.compress(b"".join(rows)))+chunk(b"IEND",b"")
 image = {"id": "image-1", "type": "imageGeneration", "status": "completed", "result": base64.b64encode(pixels).decode(), "savedPath": None, "failure": None}
