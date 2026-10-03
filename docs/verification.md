@@ -1,27 +1,27 @@
 # Current verification
 
-Checked on 2026-10-03. macOS has been built and exercised. Both platforms built and passed CI in the private GitHub repository. Windows also passed native startup and packaged CLI smoke checks; final UI changes are being synchronized.
+Checked on 2026-10-03. macOS has been built and exercised. Both platforms previously built and passed checks in GitHub Actions. Source revision `8612085` passed Windows native startup and packaged CLI smoke checks. The repository is now public, GitHub Actions is disabled, and its workflow has been removed at the user's request. Future builds and releases are manual.
 
-| Requirement | Evidence | Remaining verification |
+| Requirement | Evidence | Scope and limits |
 | --- | --- | --- |
-| Local CLI/API and shared GUI backend | Release CLI, NDJSON subprocess checks and native GPUI app use the same typed `Service::dispatch` backend | Final source revision CI |
+| Local CLI/API and shared GUI backend | Release CLI, NDJSON subprocess checks and native GPUI app use the same typed `Service::dispatch` backend | Verified on both target platforms |
 | Codex CLI and subscription | Real Codex 0.160.0 app-server detects the existing Pro account and generated the included sprites, scene and walk atlas | Real signed-out browser round trip requires user sign-in |
 | Style and character consistency | Saved style/identity snapshots; Mira's pixels attached as both character and style references to a woodland scene | Generated assets and motion need visual review |
 | Custom style | Real guide customized palette, lighting and name while preserving pinned references; native editor reviewed | None for macOS |
 | macOS app | Optimized GPUI build, packaged app, ad hoc signing, native dialogs and successful restart | None for the verified local package |
 | Windows app | MSVC release build and ZIP, 11 core tests, strict Clippy, packaged CLI round trip, responsive native window | Interactive Windows flows were not manually exercised |
-| Simple presets and controls | Six visual directions and six motion presets; detailed output/grid fields behind disclosure; buttons for sizes, timing and looping | Native simplified controls reviewed |
+| Simple presets and controls | Six visual directions and six motion presets; detailed output/grid fields behind disclosure; buttons for sizes, timing and looping | No detailed fields required for the default flow |
 | Mobbin references | Gamma, Runway, Firefly and Leonardo screens inspected; native result reviewed at 1320 and approximately 1054 logical pixels wide | Minimum 720-pixel height was not exercised |
 | Guide actions | Real guide created cast and style, generated a sprite and animation, pinned references, and updated timing; native character and timing receipts verified | None for the exercised actions |
-| Sprite/animation generation and setup | Real six-frame transparent walk atlas, PNG extraction, GIF preview and ZIP export; native import, grid fitting, extraction, pause, step and atlas view exercised | Guide timing changes refresh both playback and FPS controls |
-| Image references | Native import and style/character pinning; backend attaches actual same-project pixels | Direct import, thumbnail display and one-click removal verified in Animate |
+| Sprite/animation generation and setup | Real six-frame transparent walk atlas, PNG extraction, GIF preview and ZIP export; native import, grid fitting, extraction, pause, step and atlas view exercised | Motion still needs visual review |
+| Image references | Native import and style/character pinning; backend attaches actual same-project pixels | Up to eight combined generation references |
 
 ## Completed checks
 
 - Formatting and strict workspace Clippy pass.
 - 21 tests pass on macOS: 11 core tests and 10 subprocess integration tests. The Python executable fixture is Unix-only; Windows still runs the 11 core tests.
 - Release workspace builds succeeded locally on macOS and in GitHub Actions on both macOS and Windows.
-- [First cross-platform CI run](https://github.com/Gio-Bruno/game-asset-generator/actions/runs/37134409064) passed every required check. The Windows startup smoke opened a responsive Asset Forge window; packaged CLI persistence and six style/motion presets passed.
+- [Final cross-platform CI run](https://github.com/Gio-Bruno/game-asset-generator/actions/runs/37135878329) for source revision `8612085` passed every required check. The Windows startup smoke opened a responsive Asset Forge window; packaged CLI persistence and six style/motion presets passed.
 - Real guided sprite generation produced a 512 × 512 PNG with actual alpha. Reference pinning and style customization created no extra image job.
 - Real guided walk generation produced a 1536 × 1024 atlas with six 512-pixel cells and actual alpha, plus a GIF and portable ZIP. Its repeated poses illustrate why motion needs visual review.
 - Final import flow: a 1536 × 1024 sheet automatically fitted to six 512-pixel frames, stayed selected despite existing clips, and extracted into successful playback without opening grid fields or pressing Fit.

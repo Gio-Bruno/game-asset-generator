@@ -2109,6 +2109,30 @@ impl Render for Studio {
                     .flex()
                     .gap_1()
                     .child(
+                        Button::new("update")
+                            .label("Update")
+                            .small()
+                            .ghost()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                match open::that(crate::RELEASE_PAGE) {
+                                    Ok(()) => this.message(
+                                        concat!(
+                                            "Opened the latest release. You have Asset Forge ",
+                                            env!("CARGO_PKG_VERSION"),
+                                            ". Download the installer for your computer."
+                                        ),
+                                        false,
+                                        cx,
+                                    ),
+                                    Err(error) => this.message(
+                                        format!("Could not open the release page: {error}"),
+                                        true,
+                                        cx,
+                                    ),
+                                }
+                            })),
+                    )
+                    .child(
                         Button::new("account")
                             .label(account_label)
                             .small()

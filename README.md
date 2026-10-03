@@ -4,9 +4,20 @@ A local 2D game asset workshop for macOS and Windows, powered by your Codex subs
 
 The interface is native Rust/GPUI. The CLI, stdio API and desktop app share the same typed backend. No web server, API key, Node runtime or separate paid image API is required by Asset Forge.
 
-## Open the app
+## Download and open the app
 
-On this workspace's Mac, open `dist/Asset Forge.app`. The portable CLI is `dist/asset-forge`.
+Get the [latest release](https://github.com/Gio-Bruno/game-asset-generator/releases/latest):
+
+| Platform | Installer | Portable package |
+| --- | --- | --- |
+| macOS 12+, Apple Silicon | [Download DMG](https://github.com/Gio-Bruno/game-asset-generator/releases/latest/download/Asset-Forge-macOS-arm64.dmg) | [Download ZIP](https://github.com/Gio-Bruno/game-asset-generator/releases/latest/download/Asset-Forge-macOS.zip) |
+| Windows 10/11, x64 | [Download Setup.exe](https://github.com/Gio-Bruno/game-asset-generator/releases/latest/download/Asset-Forge-Windows-x64-Setup.exe) | [Download ZIP](https://github.com/Gio-Bruno/game-asset-generator/releases/latest/download/Asset-Forge-Windows.zip) |
+
+On macOS, open the DMG and drag **Asset Forge** into **Applications**. On Windows, run Setup.exe; it installs for your user and adds a Start menu shortcut. Windows requires the [Microsoft Visual C++ v14 x64 runtime](https://aka.ms/vc14/vc_redist.x64.exe) if it is not already installed. These first release packages do not have public distribution signatures; the Mac app uses a local ad hoc signature and is not notarized.
+
+Choose **Update** in the app to open the latest release, then download its installer. Close Asset Forge before installing an update. Your projects and generated assets are stored separately from the application.
+
+On macOS, open `dist/Asset Forge.app`. The portable CLI is `dist/asset-forge`. On Windows, extract `dist/Asset-Forge-Windows.zip` and open `asset-forge-studio.exe`; `asset-forge.exe` is the CLI.
 
 1. Install the [Codex CLI](https://learn.chatgpt.com/docs/cli) if it is not already available. Asset Forge was verified with Codex CLI **0.160.0**.
 2. Open Asset Forge. It detects the existing Codex login. Otherwise choose **Connect Codex** and complete sign-in in your browser; Codex stores and refreshes the credentials.
@@ -36,7 +47,7 @@ macOS needs Apple's Command Line Tools. GPUI uses runtime Metal shaders, so inst
 python3 scripts/package.py
 ```
 
-Packaging creates a macOS `.app` and zip, or a Windows portable zip with both executables. The Mac bundle receives a local ad hoc signature. Public distribution signing/notarization is separate. On Windows use `python` rather than `python3` if needed. The GitHub Actions workflow builds and tests on both operating systems and uploads the packages.
+Packaging creates the macOS `.app`, DMG and ZIP, or a Windows installer and portable ZIP with both executables. Windows installer packaging requires [NSIS](https://nsis.sourceforge.io/). The Mac bundle receives a local ad hoc signature. Public distribution signing/notarization is separate. On Windows use `python` rather than `python3` if needed. Builds and releases are manual; GitHub Actions is disabled and there is no CI/CD workflow. See the [release procedure](docs/releases.md) for local packaging, release branches and version tags.
 
 ## CLI
 

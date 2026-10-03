@@ -1,0 +1,32 @@
+{
+  "gpuiVersion": "0.2.2",
+  "gpuiCrateSha256": "979b45cfa6ec723b6f42330915a1b3769b930d02b2d505f9697f8ca602bee707",
+  "sourceCommit": "8612085",
+  "verificationUrl": "https://github.com/Gio-Bruno/game-asset-generator/actions/runs/37135878329",
+  "verifiedBinarySha256": "fd59782d1990dc00c328ca80ffe58b0df04452182c7b8db973762db16c847141",
+  "sourceSha256": {
+    "build.rs": "d29a19372417cbb88381324dc9f1a32916b85f238baaf67668a2ac12197e6962",
+    "src/platform/windows/shaders.hlsl": "db10b40eeea152fd8548753d270139dbe2b52fed868ad2883ab61f62e46e7c60",
+    "src/platform/windows/alpha_correction.hlsl": "5130410c01439d5da56c046987854341a5cab006f5860762c2fbf975d71e83d0",
+    "src/platform/windows/color_text_raster.hlsl": "53bb7f737dcf5b7c7a2c474cf6e7f649cc4e7d49b5526c2ac5f75f75086ce2b8",
+    "src/platform/windows/directx_renderer.rs": "b4b10b48cd3c31c1fa1390ca7eeb70c2c184db59ce1aeb387ca06563b342b010"
+  },
+  "shaderSha256": {
+    "emoji_rasterization_fragment.dxbc": "417e6b3017567c8573b9d1cd9f9ad2e3055b64f31ddd2816732b883fa6ae676d",
+    "emoji_rasterization_vertex.dxbc": "98a9f9dbe59941c1121105de777e8562afd27430733550614570caff5d8b0a32",
+    "monochrome_sprite_fragment.dxbc": "44c56dbb858e3c6dc2c8b011973eb6509d3fb99449db40f06a35668772e52348",
+    "monochrome_sprite_vertex.dxbc": "86a0043daea22b2dafe0714de8237d27605641c406f1574d8f01c19de4b09dc9",
+    "path_rasterization_fragment.dxbc": "535ab6dc630302c3cb0444329f42a301c7dbf3606a13072668654a958a653c77",
+    "path_rasterization_vertex.dxbc": "4cc02d9f17ee51316df95fcbe01e80805b6c3092ccb694c3920c78bd73deece9",
+    "path_sprite_fragment.dxbc": "e0db8afe30c47ba69c47a11f7746504b62f2e3fbf6b85b90a8c3a34d4086b090",
+    "path_sprite_vertex.dxbc": "3f219eefbd0bcf812a58c3c2bce2eb030c511755d86fcd16bf6ce5ce2d8ed222",
+    "polychrome_sprite_fragment.dxbc": "b0cecdfa2a089494ddf2e53bc63dc1c0d1dd7b9ee27a5fc0986638ac07932af9",
+    "polychrome_sprite_vertex.dxbc": "87014b6a4975fe14a0eec0bd5f4fc59416bb80d80b24f5f3325d07207e17d8c8",
+    "quad_fragment.dxbc": "6fc2296c4f3b79ac987a48462b9af465583d7de7d18c9258eeffa3926eaff1fb",
+    "quad_vertex.dxbc": "a1ab924ed40a5452e5c95deca9d4add81e449edb612f55fa9107f0422ff71ed2",
+    "shadow_fragment.dxbc": "9d63e83ec70dcf688c99319486a09e5ba578aa9a379e4b325e3a2c0eb70134af",
+    "shadow_vertex.dxbc": "c8943b328f9e0b4394a9efb52666d5698af99ff54cca1b73e3c7ee51ff355976",
+    "underline_fragment.dxbc": "ef1a1ffc95a48f5499658aa605f8ee935a758d383c60488fa1436897d5921393",
+    "underline_vertex.dxbc": "349dfc3d136a45b6948f87c7e3298cbf92854e279b0bea925fd18d9b4b9b9662"
+  }
+}

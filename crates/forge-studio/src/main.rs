@@ -1,6 +1,7 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod ui;
+const RELEASE_PAGE: &str = "https://github.com/Gio-Bruno/game-asset-generator/releases/latest";
 use forge_core::{Service, contract::Event, default_data_dir, error::Result};
 use gpui::*;
 use gpui_component::{Root, Theme, ThemeMode};
