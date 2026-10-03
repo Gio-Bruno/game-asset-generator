@@ -1,5 +1,9 @@
 # Current verification
 
+## Update button check after the local idle fix
+
+Verified on 2026-10-03 in the rebuilt local Mac app. Clicking **Update** displayed the installed version and opened Safari at the stable `/releases/latest` URL, which resolved to the published `v0.1.1` release. The browser displayed its Latest marker and both installer assets. Unauthenticated HEAD requests to the stable macOS DMG and Windows Setup.exe download URLs followed redirects and returned HTTP 200 with binary content types. No installation or release publication was performed. Update currently opens the release page for manual download/installation; it does not compare versions or install updates automatically. The local idle fix remains newer than the published installers. Native Windows button interaction was not tested.
+
 ## Woodland idle repair after v0.1.1
 
 Diagnosed on 2026-10-03 from the native app and persisted frames. Three legacy `Idle` entries incorrectly extracted 256 × 256 rectangles from the upper quarter of a 1536 × 1024 walk atlas whose actual cells were 512 × 512. The native preview displayed pieces of Mira instead of complete idle poses.
