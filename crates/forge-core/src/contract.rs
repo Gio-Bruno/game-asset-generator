@@ -466,6 +466,43 @@ pub struct ListInput {
     #[serde(default = "page_size")]
     pub page_size: usize,
 }
+/// Image/clip browsing can narrow to one saved identity, or only game-level files.
+/// Omitting both filters preserves the existing project-wide listing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MediaListInput {
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub character_id: Option<String>,
+    #[serde(default)]
+    pub is_unassigned: bool,
+    #[serde(default = "first_page")]
+    pub page: usize,
+    #[serde(default = "page_size")]
+    pub page_size: usize,
+}
+impl Default for MediaListInput {
+    fn default() -> Self {
+        Self {
+            project_id: None,
+            character_id: None,
+            is_unassigned: false,
+            page: 1,
+            page_size: 50,
+        }
+    }
+}
+
+/// One library entry per identity, with counts across all pages of its media.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibrarySubject {
+    pub subject: Character,
+    pub image_count: usize,
+    pub animation_count: usize,
+    pub preview: Option<Asset>,
+}
 fn first_page() -> usize {
     1
 }

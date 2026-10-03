@@ -136,6 +136,30 @@ impl Store {
         page: usize,
         page_size: usize,
     ) -> Result<Page<T>> {
+        self.list_media(
+            kind,
+            &MediaListInput {
+                project_id: project.map(str::to_owned),
+                page,
+                page_size,
+                ..Default::default()
+            },
+        )
+    }
+
+    pub fn list_media<T: DeserializeOwned>(
+        &self,
+        kind: &str,
+        input: &MediaListInput,
+    ) -> Result<Page<T>> {
+        let MediaListInput {
+            project_id,
+            character_id,
+            is_unassigned,
+            page,
+            page_size,
+        } = input;
+        let (page, page_size) = (*page, *page_size);
         if page == 0 || !(1..=100).contains(&page_size) || page > 1_000_000 {
             return Err(ApiError::validation(
                 "page must be positive and pageSize must be between 1 and 100.",
@@ -144,15 +168,22 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let total: usize = conn
             .query_row(
-                "SELECT COUNT(*) FROM entities e WHERE kind=?1 AND (?2 IS NULL OR project_id=?2) AND NOT EXISTS (SELECT 1 FROM deleted_entities d WHERE d.id=e.id OR d.id=e.project_id)",
-                params![kind, project],
+                "SELECT COUNT(*) FROM entities e WHERE kind=?1 AND (?2 IS NULL OR project_id=?2) AND (?3 IS NULL OR json_extract(data,'$.characterId')=?3) AND (?4=0 OR json_extract(data,'$.characterId') IS NULL) AND NOT EXISTS (SELECT 1 FROM deleted_entities d WHERE d.id=e.id OR d.id=e.project_id)",
+                params![kind, project_id, character_id, is_unassigned],
                 |r| r.get(0),
             )
             .map_err(ApiError::storage)?;
-        let mut query = conn.prepare("SELECT data FROM entities e WHERE kind=?1 AND (?2 IS NULL OR project_id=?2) AND NOT EXISTS (SELECT 1 FROM deleted_entities d WHERE d.id=e.id OR d.id=e.project_id) ORDER BY rowid DESC LIMIT ?3 OFFSET ?4").map_err(ApiError::storage)?;
+        let mut query = conn.prepare("SELECT data FROM entities e WHERE kind=?1 AND (?2 IS NULL OR project_id=?2) AND (?3 IS NULL OR json_extract(data,'$.characterId')=?3) AND (?4=0 OR json_extract(data,'$.characterId') IS NULL) AND NOT EXISTS (SELECT 1 FROM deleted_entities d WHERE d.id=e.id OR d.id=e.project_id) ORDER BY rowid DESC LIMIT ?5 OFFSET ?6").map_err(ApiError::storage)?;
         let rows = query
             .query_map(
-                params![kind, project, page_size, (page - 1) * page_size],
+                params![
+                    kind,
+                    project_id,
+                    character_id,
+                    is_unassigned,
+                    page_size,
+                    (page - 1) * page_size
+                ],
                 |r| r.get::<_, String>(0),
             )
             .map_err(ApiError::storage)?;
@@ -171,6 +202,52 @@ impl Store {
                 total_items: total,
                 total_pages: total.div_ceil(page_size),
             },
+        })
+    }
+
+    pub fn library_subjects(&self, input: &ListInput) -> Result<Page<LibrarySubject>> {
+        let subjects = self.list::<Character>(
+            "character",
+            input.project_id.as_deref(),
+            input.page,
+            input.page_size,
+        )?;
+        let conn = self.conn.lock().unwrap();
+        let mut data = Vec::with_capacity(subjects.data.len());
+        for subject in subjects.data {
+            let mut counts = conn.prepare("SELECT kind,COUNT(*) FROM entities e WHERE kind IN ('asset','animation') AND project_id=?1 AND json_extract(data,'$.characterId')=?2 AND NOT EXISTS (SELECT 1 FROM deleted_entities d WHERE d.id=e.id OR d.id=e.project_id) GROUP BY kind").map_err(ApiError::storage)?;
+            let mut image_count = 0;
+            let mut animation_count = 0;
+            for row in counts
+                .query_map(params![subject.project_id, subject.id], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, usize>(1)?))
+                })
+                .map_err(ApiError::storage)?
+            {
+                let (kind, count) = row.map_err(ApiError::storage)?;
+                if kind == "asset" {
+                    image_count = count;
+                } else {
+                    animation_count = count;
+                }
+            }
+            // Identity references can be shared game-level files. Prefer single-subject art to an atlas.
+            let references =
+                serde_json::to_string(&subject.reference_asset_ids).map_err(ApiError::storage)?;
+            let preview: Option<String> = conn.query_row("SELECT data FROM entities e WHERE kind='asset' AND project_id=?1 AND (json_extract(data,'$.characterId')=?2 OR e.id IN (SELECT value FROM json_each(?3))) AND NOT EXISTS (SELECT 1 FROM deleted_entities d WHERE d.id=e.id OR d.id=e.project_id) ORDER BY CASE WHEN json_extract(data,'$.kind')='SPRITE_SHEET' THEN 1 ELSE 0 END,CASE WHEN e.id IN (SELECT value FROM json_each(?3)) THEN 0 ELSE 1 END,rowid ASC LIMIT 1", params![subject.project_id,subject.id,references], |r| r.get(0)).optional().map_err(ApiError::storage)?;
+            let preview = preview
+                .map(|s| serde_json::from_str(&s).map_err(ApiError::storage))
+                .transpose()?;
+            data.push(LibrarySubject {
+                subject,
+                image_count,
+                animation_count,
+                preview,
+            });
+        }
+        Ok(Page {
+            data,
+            pagination: subjects.pagination,
         })
     }
 

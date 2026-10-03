@@ -131,13 +131,9 @@ impl Service {
                 encode(self.animation(&p.id)?)
             }
             "animations/list" => {
-                let p: ListInput = parse(params)?;
-                let mut page = self.store.list::<Animation>(
-                    "animation",
-                    p.project_id.as_deref(),
-                    p.page,
-                    p.page_size,
-                )?;
+                let p: MediaListInput = parse(params)?;
+                self.validate_media_list(&p)?;
+                let mut page = self.store.list_media::<Animation>("animation", &p)?;
                 for clip in &mut page.data {
                     self.sync_animation(clip)?;
                 }

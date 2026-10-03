@@ -39,6 +39,7 @@ Match errors using `code`; messages are human-facing. Malformed request envelope
 | `characters/create` | `CreateCharacter` | `Character` | Creates a resource; unsafe to retry automatically |
 | `characters/get` | `{id}` | `Character` | Safe |
 | `characters/list` | Pagination + optional `projectId` | `Page<Character>` | Safe |
+| `library/subjects/list` | Pagination + optional `projectId` | `Page<LibrarySubject>`: saved identity, total image/animation counts, optional preview asset | Safe |
 | `characters/update` | `{id, name?, description?, kind?}` | `Character` | Applies only supplied fields; retry the same intended changes |
 | `characters/references/update` | `{id, referenceAssetIds}` | `Character` | Replaces references; retry only the same intended replacement |
 | `assets/import` | `{projectId, path, name, kind?}` | `Asset` | Copies a resource; unsafe to retry automatically |
@@ -46,14 +47,14 @@ Match errors using `code`; messages are human-facing. Malformed request envelope
 | `assets/update` | `{id, name?, kind?}` | Updated `Asset`; `CONCEPT_SHEET` clears single-subject association | Reapply same fields |
 | `assets/delete` | `{id}` | `Deletion`; also hides dependent clips and unpins references | Repeated deletion returns `NOT_FOUND` |
 | `assets/restore` | `{id}` | Restored `Asset` and dependent clips; references stay unpinned | Safe |
-| `assets/list` | Pagination + optional `projectId` | `Page<Asset>` | Safe |
+| `assets/list` | Pagination + optional `projectId`, `characterId` or `isUnassigned` | `Page<Asset>` | Safe |
 | `assets/export` | `{id, path}` | `{assetId, path}` | Writes a new file; an existing target causes `EXPORT_ERROR` |
 | `animations/presets/list` | `{}` | Motion enum values | Safe |
 | `animations/create` | `CreateAnimation` | `Animation` immediately | Idempotent per project and generation key |
 | `animations/get` | `{id}` | `Animation` with current job status | Safe |
 | `animations/delete` | `{id}` | `Deletion`; source image preserved | Repeated deletion returns `NOT_FOUND` |
 | `animations/restore` | `{id}` | Restored `Animation` | Safe |
-| `animations/list` | Pagination + optional `projectId` | `Page<Animation>` | Safe |
+| `animations/list` | Pagination + optional `projectId`, `characterId` or `isUnassigned` | `Page<Animation>` | Safe |
 | `animations/setup` | `SetupAnimation` | Completed `Animation` | Idempotent per project and setup key |
 | `animations/timing/update` | `{id, fps, isLooping}` | Updated `Animation` | Same timing values can be reapplied |
 | `animations/align` | `{id, idempotencyKey}` | New aligned `Animation` and atlas | Idempotent; original preserved; no generation |
@@ -235,3 +236,9 @@ Kinds: `ASSISTANT_THINKING`, `ASSISTANT_DELTA`, `ASSISTANT_ACTION`, `ASSISTANT_F
 ## Error codes
 
 Common codes include `VALIDATION_ERROR`, `NOT_FOUND`, `METHOD_NOT_FOUND`, `WORKSPACE_BUSY`, `STORAGE_ERROR`, `IDEMPOTENCY_CONFLICT`, `CODEX_NOT_FOUND`, `CODEX_CONFIG_ERROR`, `ASSISTANT_BUSY`, `ASSISTANT_FAILED`, `QUESTION_PENDING`, `QUESTION_STALE`, `SETUP_QUESTION_REQUIRED`, `PROJECT_BUSY`, `PROJECT_DELETED`, `ACTION_DENIED`, `ACTION_LIMIT`, `GENERATION_NOT_AUTHORIZED`, `AUTH_REQUIRED`, `IMAGE_GENERATION_UNAVAILABLE`, `CODEX_ERROR`, `CODEX_TIMEOUT`, `CODEX_DISCONNECTED`, `PROTOCOL_ERROR`, `GENERATION_FAILED`, `IMAGE_GENERATION_FAILED`, `NO_IMAGE_GENERATED`, `INVALID_IMAGE`, `EMPTY_ANIMATION_FRAME`, `TRANSPARENCY_UNAVAILABLE`, `GENERATION_TIMEOUT`, `EVENTS_LOST`, `OUTCOME_UNKNOWN`, `CANCELLED` and `EXPORT_ERROR`. New error codes may be added; clients should display unknown codes with their message.
+
+## Browsing a subject library
+
+`library/subjects/list` returns one entry per saved identity, including characters, structures, props and scenes. Each `LibrarySubject` contains `subject: Character`, `imageCount`, `animationCount` and `preview: Asset | null`. Counts cover all active owned media, independent of pagination. A preview prefers a saved identity reference or original image over an animation atlas. Different identities with the same name remain separate. Game-level references can be linked without becoming owned media.
+
+For `assets/list` and `animations/list`, `characterId` narrows to one identity and is validated against `projectId` when supplied. `isUnassigned: true` selects only game-level media with no identity. These filters are mutually exclusive. Omitting both retains the previous project-wide listing. Filtering occurs before pagination; metadata counts only matching visible records, and deleted games/media are excluded.

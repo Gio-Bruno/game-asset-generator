@@ -44,6 +44,9 @@ pub struct Studio {
     projects_loaded: bool,
     project: Option<Project>,
     subjects: Vec<Character>,
+    subject_cache: HashMap<String, Character>,
+    library_subjects: Vec<LibrarySubject>,
+    subject_id: Option<String>,
     assets: Vec<Asset>,
     cache: HashMap<String, Asset>,
     selected: Option<String>,
@@ -76,6 +79,7 @@ pub struct Studio {
     management_busy: bool,
     last_deletion: Option<Deletion>,
     guide_scroll: ScrollHandle,
+    guide_scroll_pending: bool,
     guide_stream: String,
     guide_actions: Vec<String>,
     guide_submitting: bool,
@@ -111,6 +115,9 @@ impl Studio {
             projects_loaded: false,
             project: None,
             subjects: vec![],
+            subject_cache: HashMap::new(),
+            library_subjects: vec![],
+            subject_id: None,
             assets: vec![],
             cache: HashMap::new(),
             selected: None,
@@ -148,6 +155,7 @@ impl Studio {
             management_busy: false,
             last_deletion: None,
             guide_scroll: ScrollHandle::new(),
+            guide_scroll_pending: false,
             guide_stream: String::new(),
             guide_actions: vec![],
             guide_submitting: false,
@@ -256,18 +264,12 @@ impl Studio {
     }
     fn refresh(&self) {
         if let Some(id) = self.project_id() {
+            self.send("assets/list", self.media_params(self.asset_page));
             self.send(
-                "assets/list",
-                json!({"projectId":id,"page":self.asset_page,"pageSize":PAGE_SIZE}),
-            );
-            self.send(
-                "characters/list",
+                "library/subjects/list",
                 json!({"projectId":id,"page":self.subject_page,"pageSize":PAGE_SIZE}),
             );
-            self.send(
-                "animations/list",
-                json!({"projectId":id,"page":self.animation_page,"pageSize":PAGE_SIZE}),
-            );
+            self.send("animations/list", self.media_params(self.animation_page));
             if let Some(clip) = &self.animation_id {
                 self.send("animations/get", json!({"id":clip}));
             }
@@ -276,6 +278,9 @@ impl Studio {
     }
     fn reset_library(&mut self) {
         self.subjects.clear();
+        self.subject_cache.clear();
+        self.library_subjects.clear();
+        self.subject_id = None;
         self.assets.clear();
         self.cache.clear();
         self.selected = None;
@@ -425,6 +430,48 @@ impl Studio {
             .or(self.selected.as_ref())?;
         self.cache.get(id)
     }
+    fn media_params(&self, page: usize) -> Value {
+        json!({"projectId":self.project_id(),"characterId":self.subject_id,"isUnassigned":self.subject_id.is_none(),"page":page,"pageSize":PAGE_SIZE})
+    }
+    fn subject(&self) -> Option<&Character> {
+        self.subject_id
+            .as_ref()
+            .and_then(|id| self.subject_cache.get(id))
+    }
+    fn choose_subject(&mut self, id: Option<String>, cx: &mut Context<Self>) {
+        self.subject_id = id;
+        self.selected = None;
+        self.animation_id = None;
+        self.assets.clear();
+        self.animations.clear();
+        self.asset_total = 0;
+        self.animation_total = 0;
+        self.asset_page = 1;
+        self.animation_page = 1;
+        self.filter = Filter::All;
+        self.animations_loaded = false;
+        self.view = View::Library;
+        if let Some(id) = &self.subject_id
+            && !self.subject_cache.contains_key(id)
+        {
+            self.send("characters/get", json!({"id":id}));
+        }
+        if let Some(subject) = self.subject() {
+            for id in &subject.reference_asset_ids {
+                if !self.cache.contains_key(id) {
+                    self.send("assets/get", json!({"id":id}));
+                }
+            }
+        }
+        self.refresh();
+        cx.notify();
+    }
+    fn browse_subject(&mut self, cx: &mut Context<Self>) {
+        self.selected = None;
+        self.animation_id = None;
+        self.view = View::Library;
+        cx.notify();
+    }
     fn choose_asset(&mut self, id: String, cx: &mut Context<Self>) {
         self.selected = Some(id);
         self.animation_id = None;
@@ -432,7 +479,14 @@ impl Studio {
         cx.notify();
     }
     fn choose_clip(&mut self, id: String, cx: &mut Context<Self>) {
-        if let Some(clip) = self.animation_cache.get(&id) {
+        if let Some(clip) = self.animation_cache.get(&id).cloned() {
+            let owner = clip.character_id.clone();
+            if self.subject_id != owner {
+                self.subject_id = owner;
+                self.asset_page = 1;
+                self.animation_page = 1;
+                self.refresh();
+            }
             if let Some(source) = &clip.source_asset_id {
                 self.send("assets/get", json!({"id":source}));
             }
@@ -472,6 +526,11 @@ impl Studio {
     }
     fn receive(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mut changed = false;
+        if self.guide_scroll_pending {
+            self.guide_scroll_pending = false;
+            self.guide_scroll.scroll_to_bottom();
+            changed = true;
+        }
         let updates: Vec<_> = self
             .update_inbox
             .as_ref()
@@ -622,12 +681,18 @@ impl Studio {
             "assets/list",
             "assets/import",
             "characters/list",
+            "library/subjects/list",
             "animations/list",
             "jobs/list",
             "assistant/list",
         ]
         .contains(&method)
             && params["projectId"].as_str() != self.project_id().as_deref()
+        {
+            return;
+        }
+        if matches!(method, "assets/list" | "animations/list")
+            && params["characterId"].as_str() != self.subject_id.as_deref()
         {
             return;
         }
@@ -673,6 +738,30 @@ impl Studio {
             }
         };
         match method {
+            "characters/get" => {
+                if let Ok(subject) = serde_json::from_value::<Character>(data)
+                    && Some(subject.project_id.as_str()) == self.project_id().as_deref()
+                {
+                    self.subject_cache.insert(subject.id.clone(), subject);
+                }
+            }
+            "library/subjects/list" => {
+                if let Ok(page) = serde_json::from_value::<Page<LibrarySubject>>(data) {
+                    if params["page"].as_u64().unwrap_or(1) as usize != self.subject_page {
+                        return;
+                    }
+                    self.subject_total = page.pagination.total_items;
+                    self.subjects = page.data.iter().map(|s| s.subject.clone()).collect();
+                    for entry in &page.data {
+                        self.subject_cache
+                            .insert(entry.subject.id.clone(), entry.subject.clone());
+                        if let Some(asset) = &entry.preview {
+                            self.cache.insert(asset.id.clone(), asset.clone());
+                        }
+                    }
+                    self.library_subjects = page.data;
+                }
+            }
             "projects/list" => {
                 if let Ok(page) = serde_json::from_value::<Page<Project>>(data) {
                     self.projects = page.data;
@@ -791,9 +880,6 @@ impl Studio {
                         self.cache.insert(asset.id.clone(), asset.clone());
                     }
                     self.assets = page.data;
-                    if self.selected.is_none() && self.animation_id.is_none() {
-                        self.selected = self.assets.first().map(|a| a.id.clone());
-                    }
                 }
             }
             "assets/get" | "assets/import" => {
@@ -861,6 +947,11 @@ impl Studio {
                     if let Some(id) = job.asset_ids.first()
                         && self.ready_jobs.insert(job.id.clone())
                     {
+                        self.subject_id = job.request.character_id.clone();
+                        if let Some(subject) = &job.character_snapshot {
+                            self.subject_cache
+                                .insert(subject.id.clone(), subject.clone());
+                        }
                         self.send("assets/get", json!({"id":id}));
                         if job.request.animation.is_some() {
                             self.animation_id = Some(job.id.clone());
@@ -947,7 +1038,9 @@ impl Studio {
                     && self.guide.is_none()
                 {
                     self.guide = page.data.into_iter().next();
+                    self.guide_scroll_pending = true;
                     if let Some(guide) = &self.guide
+                        && guide.status == AssistantStatus::Thinking
                         && let Some(id) = guide.generated_job_ids.last()
                     {
                         self.send("jobs/get", json!({"id":id}));
@@ -1178,6 +1271,24 @@ impl Studio {
             asset.name.clone()
         }
     }
+    fn clip_title(&self, clip: &Animation) -> String {
+        if let Some(subject) = clip
+            .character_id
+            .as_ref()
+            .and_then(|id| self.subject_cache.get(id))
+        {
+            for separator in [" — ", " – ", " - "] {
+                if let Some(title) = clip
+                    .config
+                    .name
+                    .strip_prefix(&format!("{}{separator}", subject.name))
+                {
+                    return title.to_owned();
+                }
+            }
+        }
+        clip.config.name.clone()
+    }
     fn has_previous_page(&self) -> bool {
         (self.filter != Filter::Animations && self.asset_page > 1)
             || (self.filter != Filter::Images && self.animation_page > 1)
@@ -1259,256 +1370,138 @@ impl Studio {
                     ),
             );
         }
-        let mut filters = div().flex().gap_1();
-        for (filter, name) in [
-            (Filter::All, "All"),
-            (Filter::Images, "Images"),
-            (Filter::Animations, "Clips"),
-        ] {
-            filters = filters.child(
-                Button::new(SharedString::from(format!("filter-{name}")))
-                    .label(name)
-                    .xsmall()
-                    .ghost()
-                    .when(self.filter == filter, |b| b.bg(rgb(0xe3e9de)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.filter = filter;
-                        cx.notify();
-                    })),
-            );
-        }
-        let mut assets = div()
-            .id("asset-list")
+        let mut catalog = div()
+            .id("subject-list")
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
             .flex()
             .flex_col()
             .gap_1();
-        for job in &self.active_jobs {
-            let id = job.id.clone();
-            assets = assets.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .p_2()
-                    .gap_2()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .child(
-                                div().text_xs().truncate().child(
-                                    job.character_snapshot
-                                        .as_ref()
-                                        .map(|s| s.name.clone())
-                                        .unwrap_or_else(|| "New asset".into()),
-                                ),
-                            )
-                            .child(div().text_size(px(10.)).text_color(rgb(MUTED)).child(
-                                if job.status == JobStatus::Running {
-                                    "Rendering…"
-                                } else {
-                                    "Queued"
-                                },
-                            )),
-                    )
-                    .child(
-                        Button::new(SharedString::from(format!("cancel-{id}")))
-                            .label("×")
-                            .tooltip("Cancel this asset")
-                            .xsmall()
-                            .ghost()
-                            .on_click(cx.listener(move |this, _, _, _| {
-                                this.send("jobs/cancel", json!({"id":id}))
-                            })),
-                    ),
-            );
-        }
-        if self.filter != Filter::Animations {
-            for asset in &self.assets {
-                let selected_id = asset.id.clone();
-                let deleted = asset.clone();
-                let active =
-                    self.animation_id.is_none() && self.selected.as_ref() == Some(&asset.id);
-                assets = assets.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .rounded_md()
-                        .when(active, |d| d.bg(rgb(0xe3e9de)))
-                        .child(
-                            div()
-                                .id(SharedString::from(format!("image-{}", asset.id)))
-                                .flex_1()
-                                .min_w_0()
-                                .p_2()
-                                .flex()
-                                .gap_2()
-                                .items_center()
-                                .cursor_pointer()
-                                .child(
-                                    img(PathBuf::from(&asset.path))
-                                        .size(px(32.))
-                                        .object_fit(ObjectFit::Contain),
-                                )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .flex()
-                                        .flex_col()
-                                        .child(div().text_xs().truncate().child(asset.name.clone()))
-                                        .child(
-                                            div().text_size(px(10.)).text_color(rgb(MUTED)).child(
-                                                format!("{} × {}", asset.width, asset.height),
-                                            ),
-                                        ),
-                                )
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.choose_asset(selected_id.clone(), cx)
-                                })),
-                        )
-                        .child(
-                            Button::new(SharedString::from(format!("delete-image-{}", asset.id)))
-                                .label("×")
-                                .tooltip("Delete image")
-                                .xsmall()
-                                .ghost()
-                                .disabled(busy || self.rendering())
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.confirm_delete(
-                                        "asset",
-                                        deleted.id.clone(),
-                                        deleted.name.clone(),
-                                        window,
-                                        cx,
-                                    )
-                                })),
-                        ),
-                );
+        for (kind, title) in [
+            (SubjectKind::Character, "CHARACTERS"),
+            (SubjectKind::Structure, "STRUCTURES"),
+            (SubjectKind::Prop, "PROPS"),
+            (SubjectKind::Scene, "SCENES"),
+        ] {
+            let entries: Vec<_> = self
+                .library_subjects
+                .iter()
+                .filter(|s| s.subject.kind == kind)
+                .collect();
+            if entries.is_empty() {
+                continue;
             }
-        }
-        if self.filter != Filter::Images {
-            for clip in &self.animations {
-                let selected_id = clip.id.clone();
-                let deleted = clip.clone();
+            catalog = catalog.child(label(title).mt_3().mb_1());
+            for entry in entries {
+                let id = entry.subject.id.clone();
                 let mut thumbnail = div()
-                    .size(px(32.))
+                    .size(px(36.))
                     .flex_shrink_0()
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child("▶");
-                if let Some(frame) = clip.frames.first() {
-                    thumbnail = div().size(px(32.)).flex_shrink_0().child(
-                        img(PathBuf::from(&frame.path))
+                    .text_color(rgb(GREEN))
+                    .child("✦");
+                if let Some(asset) = &entry.preview {
+                    thumbnail = div().size(px(36.)).flex_shrink_0().child(
+                        img(PathBuf::from(&asset.path))
                             .size_full()
                             .object_fit(ObjectFit::Contain),
                     );
                 }
-                assets = assets.child(
+                let rendering = self
+                    .active_jobs
+                    .iter()
+                    .any(|j| j.request.character_id.as_ref() == Some(&entry.subject.id));
+                catalog = catalog.child(
                     div()
-                        .flex()
-                        .items_center()
+                        .id(SharedString::from(format!("subject-{id}")))
+                        .p_2()
                         .rounded_md()
-                        .when(self.animation_id.as_ref() == Some(&clip.id), |d| {
+                        .flex()
+                        .gap_2()
+                        .items_center()
+                        .cursor_pointer()
+                        .when(self.subject_id.as_ref() == Some(&id), |d| {
                             d.bg(rgb(0xe3e9de))
                         })
+                        .child(thumbnail)
                         .child(
                             div()
-                                .id(SharedString::from(format!("clip-{}", clip.id)))
                                 .flex_1()
                                 .min_w_0()
-                                .p_2()
                                 .flex()
-                                .gap_2()
-                                .items_center()
-                                .cursor_pointer()
-                                .child(thumbnail)
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .flex()
-                                        .flex_col()
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .truncate()
-                                                .child(clip.config.name.clone()),
+                                .flex_col()
+                                .child(div().text_sm().truncate().child(entry.subject.name.clone()))
+                                .child(div().text_size(px(10.)).text_color(rgb(MUTED)).child(
+                                    if rendering {
+                                        "Rendering…".into()
+                                    } else {
+                                        format!(
+                                            "{} image{} · {} animation{}",
+                                            entry.image_count,
+                                            if entry.image_count == 1 { "" } else { "s" },
+                                            entry.animation_count,
+                                            if entry.animation_count == 1 { "" } else { "s" }
                                         )
-                                        .child(
-                                            div().text_size(px(10.)).text_color(rgb(MUTED)).child(
-                                                format!(
-                                                    "{} frames · {} FPS",
-                                                    clip.frames.len(),
-                                                    clip.config.fps
-                                                ),
-                                            ),
-                                        ),
-                                )
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.choose_clip(selected_id.clone(), cx)
-                                })),
+                                    },
+                                )),
                         )
-                        .child(
-                            Button::new(SharedString::from(format!("delete-clip-{}", clip.id)))
-                                .label("×")
-                                .tooltip("Delete clip")
-                                .xsmall()
-                                .ghost()
-                                .disabled(busy || self.rendering())
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.confirm_delete(
-                                        "animation",
-                                        deleted.id.clone(),
-                                        deleted.config.name.clone(),
-                                        window,
-                                        cx,
-                                    )
-                                })),
-                        ),
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.choose_subject(Some(id.clone()), cx)
+                        })),
                 );
             }
         }
-        if self.asset_total + self.animation_total == 0 {
-            assets = assets.child(div().p_2().text_xs().text_color(rgb(MUTED)).child(
-                if self.project.is_some() {
-                    "Your game's assets will appear here."
-                } else {
-                    "Choose a game or start one in chat."
-                },
-            ));
+        if self.subject_total == 0 {
+            catalog = catalog.child(
+                div()
+                    .p_2()
+                    .text_xs()
+                    .text_color(rgb(MUTED))
+                    .child("Ask Forge to create your characters, structures and scenery."),
+            );
         }
+        catalog = catalog.child(label("GAME FILES").mt_4()).child(
+            Button::new("game-files")
+                .label("References & other assets")
+                .small()
+                .ghost()
+                .when(self.subject_id.is_none(), |b| b.bg(rgb(0xe3e9de)))
+                .on_click(cx.listener(|this, _, _, cx| this.choose_subject(None, cx))),
+        );
         let pages = div()
             .flex()
             .items_center()
             .justify_between()
-            .child(label(format!(
-                "{} IMAGES · {} CLIPS",
-                self.asset_total, self.animation_total
-            )))
+            .child(label(format!("{} SUBJECTS", self.subject_total)))
             .child(
                 div()
                     .flex()
                     .child(
-                        Button::new("prev")
+                        Button::new("subjects-prev")
                             .label("←")
                             .xsmall()
                             .ghost()
-                            .disabled(!self.has_previous_page())
-                            .on_click(cx.listener(|this, _, _, cx| this.turn_page(false, cx))),
+                            .disabled(self.subject_page == 1)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.subject_page = this.subject_page.saturating_sub(1).max(1);
+                                this.refresh();
+                                cx.notify();
+                            })),
                     )
                     .child(
-                        Button::new("next")
+                        Button::new("subjects-next")
                             .label("→")
                             .xsmall()
                             .ghost()
-                            .disabled(!self.has_next_page())
-                            .on_click(cx.listener(|this, _, _, cx| this.turn_page(true, cx))),
+                            .disabled(self.subject_page * PAGE_SIZE >= self.subject_total)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.subject_page += 1;
+                                this.refresh();
+                                cx.notify();
+                            })),
                     ),
             );
         div()
@@ -1544,13 +1537,382 @@ impl Studio {
                     .pt_3()
                     .border_t_1()
                     .border_color(rgb(LINE))
-                    .child(label("THIS GAME'S ASSETS")),
+                    .child(label("THIS GAME'S LIBRARY")),
             )
+            .child(catalog)
+            .child(pages)
+    }
+
+    fn media_browser(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let busy = self.guide_busy() || self.management_busy || self.rendering();
+        let mut header = div().flex().gap_4().items_center();
+        let subject = self.subject();
+        if let Some(subject) = subject {
+            let preview = self
+                .library_subjects
+                .iter()
+                .find(|s| s.subject.id == subject.id)
+                .and_then(|s| s.preview.as_ref())
+                .or_else(|| {
+                    self.cache
+                        .values()
+                        .filter(|a| {
+                            a.character_id.as_ref() == Some(&subject.id)
+                                && a.kind != AssetKind::SpriteSheet
+                        })
+                        .min_by_key(|a| a.created_at)
+                });
+            if let Some(asset) = preview {
+                header = header.child(
+                    div()
+                        .size(px(84.))
+                        .flex_shrink_0()
+                        .rounded_md()
+                        .bg(rgb(0xe9eae1))
+                        .child(
+                            img(PathBuf::from(&asset.path))
+                                .size_full()
+                                .object_fit(ObjectFit::Contain),
+                        ),
+                );
+            }
+        }
+        header = header.child(div().flex_1().min_w_0().flex().flex_col().gap_2()
+            .child(label(subject.map(|s| s.kind.label()).unwrap_or("GAME FILES")))
+            .child(div().font_family("Lora").text_size(px(28.)).child(subject.map(|s| s.name.clone()).unwrap_or_else(|| "References & other assets".into())))
+            .child(div().text_sm().text_color(rgb(MUTED)).child(subject.map(|s| s.description.clone()).unwrap_or_else(|| "Concept boards and files for the whole game. Character assets live with their character.".into()))));
+        if let Some(subject) = subject {
+            let saved = subject.clone();
+            header = header.child(
+                Button::new("subject-chat")
+                    .label("Add to chat")
+                    .small()
+                    .ghost()
+                    .disabled(self.guide_busy())
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.discuss_subject(saved.clone(), window, cx)
+                    })),
+            );
+        }
+        let mut filters = div().flex().items_center().gap_2();
+        for (filter, name) in [
+            (Filter::All, "All"),
+            (Filter::Images, "Images"),
+            (Filter::Animations, "Animations"),
+        ] {
+            filters = filters.child(
+                Button::new(SharedString::from(format!("media-filter-{name}")))
+                    .label(name)
+                    .small()
+                    .ghost()
+                    .when(self.filter == filter, |b| b.bg(rgb(0xe3e9de)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.filter = filter;
+                        cx.notify();
+                    })),
+            );
+        }
+        let mut content = div()
+            .id("subject-media")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap_3();
+        for job in self
+            .active_jobs
+            .iter()
+            .filter(|j| j.request.character_id == self.subject_id)
+        {
+            let id = job.id.clone();
+            content = content.child(
+                div()
+                    .p_3()
+                    .rounded_md()
+                    .bg(rgb(0xe9eae1))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(div().text_sm().child(if job.status == JobStatus::Running {
+                        "Rendering a new asset…"
+                    } else {
+                        "A new asset is queued…"
+                    }))
+                    .child(
+                        Button::new(SharedString::from(format!("cancel-{id}")))
+                            .label("Cancel")
+                            .small()
+                            .ghost()
+                            .on_click(cx.listener(move |this, _, _, _| {
+                                this.send("jobs/cancel", json!({"id":id}))
+                            })),
+                    ),
+            );
+        }
+        if let Some(subject) = subject {
+            let references: Vec<_> = subject
+                .reference_asset_ids
+                .iter()
+                .filter_map(|id| self.cache.get(id))
+                .filter(|a| a.character_id.as_ref() != Some(&subject.id))
+                .collect();
+            if !references.is_empty() {
+                let mut links = div().flex().flex_wrap().gap_2();
+                for asset in references {
+                    let id = asset.id.clone();
+                    links =
+                        links.child(
+                            Button::new(SharedString::from(format!("reference-{id}")))
+                                .label(asset.name.clone())
+                                .small()
+                                .ghost()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.choose_asset(id.clone(), cx)
+                                })),
+                        );
+                }
+                content = content.child(label("LINKED REFERENCES")).child(links);
+            }
+        }
+        if self.filter != Filter::Animations {
+            content = content.child(label(format!("IMAGES / {}", self.asset_total)));
+            let mut cards = div().flex().flex_wrap().gap_3();
+            for asset in &self.assets {
+                let id = asset.id.clone();
+                let deleted = asset.clone();
+                let identity_ref =
+                    subject.is_some_and(|s| s.reference_asset_ids.contains(&asset.id));
+                let title = if asset.kind == AssetKind::SpriteSheet {
+                    self.animation_cache
+                        .values()
+                        .find(|c| c.source_asset_id.as_ref() == Some(&asset.id))
+                        .map(|c| format!("{} · atlas", self.clip_title(c)))
+                        .unwrap_or_else(|| "Sprite atlas".into())
+                } else {
+                    asset.name.clone()
+                };
+                cards = cards.child(
+                    div()
+                        .w(px(184.))
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(rgb(LINE))
+                        .bg(rgb(0xffffff))
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("open-image-{id}")))
+                                .p_3()
+                                .cursor_pointer()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(
+                                    img(PathBuf::from(&asset.path))
+                                        .w_full()
+                                        .h(px(106.))
+                                        .object_fit(ObjectFit::Contain),
+                                )
+                                .child(div().text_sm().child(title))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.choose_asset(id.clone(), cx)
+                                })),
+                        )
+                        .child(
+                            div()
+                                .px_3()
+                                .pb_2()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(div().text_size(px(10.)).text_color(rgb(MUTED)).child(
+                                    if identity_ref {
+                                        "Identity reference".into()
+                                    } else {
+                                        format!("{} × {} · PNG", asset.width, asset.height)
+                                    },
+                                ))
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "delete-image-{}",
+                                        asset.id
+                                    )))
+                                    .label("×")
+                                    .tooltip("Delete image")
+                                    .xsmall()
+                                    .ghost()
+                                    .disabled(busy)
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.confirm_delete(
+                                            "asset",
+                                            deleted.id.clone(),
+                                            deleted.name.clone(),
+                                            window,
+                                            cx,
+                                        )
+                                    })),
+                                ),
+                        ),
+                );
+            }
+            content = content.child(cards);
+        }
+        if self.filter != Filter::Images {
+            content = content.child(label(format!("ANIMATIONS / {}", self.animation_total)));
+            let mut cards = div().flex().flex_wrap().gap_3();
+            for clip in &self.animations {
+                let id = clip.id.clone();
+                let deleted = clip.clone();
+                let status = match clip.status {
+                    JobStatus::Queued => "Queued",
+                    JobStatus::Running => "Rendering",
+                    JobStatus::Succeeded => "Ready",
+                    JobStatus::Failed => "Failed",
+                    JobStatus::Cancelled => "Cancelled",
+                    JobStatus::Unknown => "Needs review",
+                };
+                let mut thumbnail = div()
+                    .w_full()
+                    .h(px(106.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(rgb(MUTED))
+                    .child("▶");
+                if let Some(frame) = clip.frames.first() {
+                    thumbnail = div()
+                        .w_full()
+                        .h(px(106.))
+                        .flex_shrink_0()
+                        .overflow_hidden()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            img(PathBuf::from(&frame.path))
+                                .size(px(96.))
+                                .flex_shrink_0()
+                                .object_fit(ObjectFit::Contain),
+                        );
+                }
+                cards = cards.child(
+                    div()
+                        .w(px(184.))
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(rgb(LINE))
+                        .bg(rgb(0xffffff))
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("open-clip-{id}")))
+                                .p_3()
+                                .cursor_pointer()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(thumbnail)
+                                .child(div().text_sm().child(self.clip_title(clip)))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.choose_clip(id.clone(), cx)
+                                })),
+                        )
+                        .child(
+                            div()
+                                .px_3()
+                                .pb_2()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .text_size(px(10.))
+                                        .text_color(rgb(MUTED))
+                                        .child(format!("{} · {} FPS", status, clip.config.fps)),
+                                )
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "delete-clip-{}",
+                                        clip.id
+                                    )))
+                                    .label("×")
+                                    .tooltip("Delete animation")
+                                    .xsmall()
+                                    .ghost()
+                                    .disabled(busy)
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.confirm_delete(
+                                            "animation",
+                                            deleted.id.clone(),
+                                            deleted.config.name.clone(),
+                                            window,
+                                            cx,
+                                        )
+                                    })),
+                                ),
+                        ),
+                );
+            }
+            content = content.child(cards);
+        }
+        if self.asset_total + self.animation_total == 0 {
+            content = content.child(
+                div()
+                    .p_4()
+                    .text_sm()
+                    .text_color(rgb(MUTED))
+                    .child("Ask Forge to make an image or animation. It will appear here."),
+            );
+        }
+        let pages = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(label(format!(
+                "{} IMAGES · {} ANIMATIONS",
+                self.asset_total, self.animation_total
+            )))
+            .child(
+                div()
+                    .flex()
+                    .gap_1()
+                    .child(
+                        Button::new("media-prev")
+                            .label("←")
+                            .small()
+                            .ghost()
+                            .disabled(!self.has_previous_page())
+                            .on_click(cx.listener(|this, _, _, cx| this.turn_page(false, cx))),
+                    )
+                    .child(
+                        Button::new("media-next")
+                            .label("→")
+                            .small()
+                            .ghost()
+                            .disabled(!self.has_next_page())
+                            .on_click(cx.listener(|this, _, _, cx| this.turn_page(true, cx))),
+                    ),
+            );
+        div()
+            .id("subject-workspace")
+            .flex_1()
+            .min_h_0()
+            .p_5()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(header)
             .child(filters)
-            .child(assets)
+            .child(content)
             .child(pages)
     }
     fn library(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        if self.selected.is_none() && self.animation_id.is_none() {
+            return self.media_browser(cx);
+        }
         let clip = self.clip();
         let asset = self.selected_asset();
         let preview = if let Some(clip) = clip
@@ -1559,6 +1921,7 @@ impl Studio {
             clip.frames
                 .get(self.frame_index.min(clip.frames.len().saturating_sub(1)))
                 .map(|f| f.path.clone())
+                .or_else(|| asset.map(|a| a.path.clone()))
         } else {
             asset.map(|a| a.path.clone())
         };
@@ -1702,7 +2065,7 @@ impl Studio {
                 )
                 .child(label(format!(
                     "FRAME {} / {}",
-                    self.frame_index + 1,
+                    if ready { self.frame_index + 1 } else { 0 },
                     clip.frames.len()
                 )))
                 .when(asset.is_some(), |d| {
@@ -1725,7 +2088,29 @@ impl Studio {
             .flex()
             .flex_col()
             .gap_3()
+            .child(
+                Button::new("back-to-subject")
+                    .label(format!(
+                        "← {}",
+                        self.subject()
+                            .map(|s| s.name.as_str())
+                            .unwrap_or("Game files")
+                    ))
+                    .small()
+                    .ghost()
+                    .on_click(cx.listener(|this, _, _, cx| this.browse_subject(cx))),
+            )
             .child(tools)
+            .when_some(clip.and_then(|c| c.error.as_ref()), |d, error| {
+                d.child(
+                    div()
+                        .p_3()
+                        .rounded_md()
+                        .bg(rgb(0xf3e5dc))
+                        .text_sm()
+                        .child(error.message.clone()),
+                )
+            })
             .child(canvas)
             .when(clip.is_some(), |d| d.child(playback))
     }
@@ -1813,6 +2198,7 @@ impl Studio {
                 content = content.child(label(format!("{title} / {}", subjects.len())));
                 for subject in subjects {
                     let saved = subject.clone();
+                    let browse_id = subject.id.clone();
                     content =
                         content.child(
                             div()
@@ -1833,6 +2219,18 @@ impl Studio {
                                             div()
                                                 .font_weight(FontWeight::SEMIBOLD)
                                                 .child(subject.name.clone()),
+                                        )
+                                        .child(
+                                            Button::new(SharedString::from(format!(
+                                                "subject-browse-{}",
+                                                subject.id
+                                            )))
+                                            .label("View assets")
+                                            .xsmall()
+                                            .ghost()
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.choose_subject(Some(browse_id.clone()), cx)
+                                            })),
                                         )
                                         .child(
                                             Button::new(SharedString::from(format!(

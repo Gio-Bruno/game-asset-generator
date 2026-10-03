@@ -100,6 +100,25 @@ impl Service {
         Ok(client)
     }
 
+    pub(crate) fn validate_media_list(&self, input: &MediaListInput) -> Result<()> {
+        if input.character_id.is_some() && input.is_unassigned {
+            return Err(ApiError::validation(
+                "Choose a characterId or isUnassigned, not both.",
+            ));
+        }
+        if let Some(id) = &input.character_id {
+            let subject: Character = self.store.get("character", id)?;
+            if input
+                .project_id
+                .as_ref()
+                .is_some_and(|p| p != &subject.project_id)
+            {
+                return Err(ApiError::validation("Choose a subject in this project."));
+            }
+        }
+        Ok(())
+    }
+
     /// All transports use this contract. Inputs are validated once at this boundary.
     pub fn dispatch<'a>(
         &'a self,
@@ -151,7 +170,7 @@ impl Service {
                     Ok(json!({"isReady":true}))
                 }
                 "system/info" => Ok(
-                    json!({"apiVersion":1,"version":env!("CARGO_PKG_VERSION"),"dataDir":self.store.root,"transport":"stdio","capabilities":["2D","STYLE_REFERENCES","CHARACTER_REFERENCES","PNG_EXPORT","CANCELLATION","STYLE_PRESETS","AI_GUIDE","SPRITE_ANIMATION","ANIMATION_ZIP_EXPORT"]}),
+                    json!({"apiVersion":1,"version":env!("CARGO_PKG_VERSION"),"dataDir":self.store.root,"transport":"stdio","capabilities":["2D","STYLE_REFERENCES","CHARACTER_REFERENCES","PNG_EXPORT","CANCELLATION","STYLE_PRESETS","AI_GUIDE","SPRITE_ANIMATION","ANIMATION_ZIP_EXPORT","SUBJECT_LIBRARY"]}),
                 ),
                 "account/read" => encode(self.codex().await?.account().await?),
                 "account/login/start" => encode(self.codex().await?.login().await?),
@@ -355,13 +374,13 @@ impl Service {
                     )?)
                 }
                 "assets/list" => {
+                    let p: MediaListInput = decode(params)?;
+                    self.validate_media_list(&p)?;
+                    encode(self.store.list_media::<Asset>("asset", &p)?)
+                }
+                "library/subjects/list" => {
                     let p: ListInput = decode(params)?;
-                    encode(self.store.list::<Asset>(
-                        "asset",
-                        p.project_id.as_deref(),
-                        p.page,
-                        p.page_size,
-                    )?)
+                    encode(self.store.library_subjects(&p)?)
                 }
                 "assets/get" => {
                     let p: IdInput = decode(params)?;
@@ -934,6 +953,231 @@ struct ExportInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn subject_library_groups_by_identity_with_scoped_media_and_recoverable_deletion() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = Service::open(tmp.path()).unwrap();
+        let mut projects = Vec::new();
+        for name in ["Game", "Other game"] {
+            projects.push(
+                s.dispatch(
+                    "projects/create",
+                    json!({"name":name,"style":{"name":"Ink","description":"Ink"}}),
+                )
+                .await
+                .unwrap()["id"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+            );
+        }
+        let mut subjects = Vec::new();
+        for project in [&projects[0], &projects[0], &projects[1]] {
+            let subject: Character = serde_json::from_value(s.dispatch("characters/create", json!({"projectId":project,"name":"Cinder Fiend","description":"Same name, independent saved identity"})).await.unwrap()).unwrap();
+            subjects.push(subject);
+        }
+        for i in 0..55 {
+            let asset = Asset {
+                id: format!("image-{i}"),
+                project_id: projects[0].clone(),
+                job_id: None,
+                character_id: Some(subjects[0].id.clone()),
+                kind: if i == 54 {
+                    AssetKind::SpriteSheet
+                } else {
+                    AssetKind::Character
+                },
+                name: "Cinder Fiend".into(),
+                path: "fixture.png".into(),
+                width: 256,
+                height: 256,
+                has_alpha: true,
+                created_at: i,
+            };
+            s.store
+                .put("asset", &asset.id, Some(&asset.project_id), &asset)
+                .unwrap();
+        }
+        for (id, owner) in [
+            ("other-identity", Some(subjects[1].id.clone())),
+            ("board", None),
+        ] {
+            let asset = Asset {
+                id: id.into(),
+                project_id: projects[0].clone(),
+                job_id: None,
+                character_id: owner,
+                kind: AssetKind::Character,
+                name: "Cinder Fiend".into(),
+                path: "fixture.png".into(),
+                width: 256,
+                height: 256,
+                has_alpha: true,
+                created_at: 100,
+            };
+            s.store
+                .put("asset", &asset.id, Some(&asset.project_id), &asset)
+                .unwrap();
+        }
+        for (id, owner, source) in [
+            ("walk", Some(subjects[0].id.clone()), Some("image-54")),
+            ("idle", Some(subjects[0].id.clone()), Some("image-0")),
+            (
+                "other-walk",
+                Some(subjects[1].id.clone()),
+                Some("other-identity"),
+            ),
+            ("unassigned", None, Some("board")),
+        ] {
+            let clip = Animation {
+                id: id.into(),
+                project_id: projects[0].clone(),
+                character_id: owner,
+                job_id: None,
+                source_asset_id: source.map(str::to_owned),
+                config: serde_json::from_value(json!({"name":id})).unwrap(),
+                status: JobStatus::Succeeded,
+                frames: vec![],
+                preview_path: None,
+                error: None,
+                created_at: 100,
+            };
+            s.store
+                .put("animation", &clip.id, Some(&clip.project_id), &clip)
+                .unwrap();
+        }
+        let summary = s
+            .dispatch(
+                "library/subjects/list",
+                json!({"projectId":projects[0],"pageSize":1,"page":2}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(summary["pagination"]["totalItems"], 2);
+        assert_eq!(summary["data"][0]["subject"]["id"], subjects[0].id);
+        assert_eq!(summary["data"][0]["imageCount"], 55);
+        assert_eq!(summary["data"][0]["animationCount"], 2);
+        assert_eq!(summary["data"][0]["preview"]["id"], "image-0");
+        s.dispatch(
+            "characters/references/update",
+            json!({"id":subjects[0].id,"referenceAssetIds":["board"]}),
+        )
+        .await
+        .unwrap();
+        let pinned = s
+            .dispatch(
+                "library/subjects/list",
+                json!({"projectId":projects[0],"pageSize":1,"page":2}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(pinned["data"][0]["preview"]["id"], "board");
+        assert_eq!(pinned["data"][0]["imageCount"], 55);
+        let scoped =
+            json!({"projectId":projects[0],"characterId":subjects[0].id,"pageSize":24,"page":2});
+        let page = s.dispatch("assets/list", scoped.clone()).await.unwrap();
+        assert_eq!(page["pagination"]["totalItems"], 55);
+        assert_eq!(page["data"].as_array().unwrap().len(), 24);
+        assert!(
+            page["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|a| a["characterId"] == subjects[0].id)
+        );
+        assert_eq!(
+            s.dispatch("assets/list", json!({"projectId":projects[0]}))
+                .await
+                .unwrap()["pagination"]["totalItems"],
+            57
+        );
+        for method in ["assets/list", "animations/list"] {
+            let page = s
+                .dispatch(method, json!({"projectId":projects[0],"isUnassigned":true}))
+                .await
+                .unwrap();
+            assert_eq!(page["pagination"]["totalItems"], 1);
+            assert!(page["data"][0]["characterId"].is_null());
+            assert_eq!(
+                s.dispatch(
+                    method,
+                    json!({"projectId":projects[1],"characterId":subjects[0].id})
+                )
+                .await
+                .unwrap_err()
+                .code,
+                "VALIDATION_ERROR"
+            );
+            assert_eq!(
+                s.dispatch(
+                    method,
+                    json!({"characterId":subjects[0].id,"isUnassigned":true})
+                )
+                .await
+                .unwrap_err()
+                .code,
+                "VALIDATION_ERROR"
+            );
+            assert_eq!(
+                s.dispatch(method, json!({"characterId":"missing"}))
+                    .await
+                    .unwrap_err()
+                    .code,
+                "NOT_FOUND"
+            );
+            assert_eq!(
+                s.dispatch(method, json!({"unexpected":true}))
+                    .await
+                    .unwrap_err()
+                    .code,
+                "VALIDATION_ERROR"
+            );
+        }
+        s.dispatch("assets/delete", json!({"id":"image-54"}))
+            .await
+            .unwrap();
+        let summary = s
+            .dispatch(
+                "library/subjects/list",
+                json!({"projectId":projects[0],"pageSize":1,"page":2}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(summary["data"][0]["imageCount"], 54);
+        assert_eq!(summary["data"][0]["animationCount"], 1);
+        assert_eq!(
+            s.dispatch("characters/get", json!({"id":subjects[0].id}))
+                .await
+                .unwrap()["name"],
+            "Cinder Fiend"
+        );
+        s.dispatch("assets/restore", json!({"id":"image-54"}))
+            .await
+            .unwrap();
+        assert_eq!(
+            s.dispatch("animations/list", json!({"characterId":subjects[0].id}))
+                .await
+                .unwrap()["pagination"]["totalItems"],
+            2
+        );
+        s.dispatch("projects/delete", json!({"id":projects[0]}))
+            .await
+            .unwrap();
+        let global = s
+            .dispatch("library/subjects/list", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(global["pagination"]["totalItems"], 1);
+        assert_eq!(global["data"][0]["subject"]["id"], subjects[2].id);
+        assert_eq!(global["data"][0]["imageCount"], 0);
+        s.dispatch("projects/restore", json!({"id":projects[0]}))
+            .await
+            .unwrap();
+        assert_eq!(
+            s.dispatch("assets/list", scoped).await.unwrap()["pagination"]["totalItems"],
+            55
+        );
+    }
     #[tokio::test]
     async fn boundary_rejects_unknown_fields_and_invalid_palette() {
         let tmp = tempfile::tempdir().unwrap();
