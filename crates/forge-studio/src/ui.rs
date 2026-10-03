@@ -656,9 +656,10 @@ impl Studio {
                     }
                     self.animations = page.data;
                     if self.animation_id.is_none() {
-                        self.animation_id = self.animations.first().map(|a| a.id.clone());
-                    }
-                    if refresh_selection && let Some(clip) = selected {
+                        if let Some(clip) = self.animations.first().cloned() {
+                            self.choose_animation(clip, window, cx);
+                        }
+                    } else if refresh_selection && let Some(clip) = selected {
                         self.choose_animation(clip, window, cx);
                     }
                 }
@@ -2385,8 +2386,10 @@ impl Render for Studio {
                     ),
             );
         let create = div()
+            .id("create-workspace")
             .flex_1()
             .min_h_0()
+            .overflow_y_scroll()
             .p_5()
             .flex()
             .flex_col()
