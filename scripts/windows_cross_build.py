@@ -13,7 +13,6 @@ import os
 import platform
 import re
 import shutil
-import struct
 import subprocess
 import tarfile
 import urllib.request
@@ -143,6 +142,8 @@ def prepare_gpui(env):
     if original.count(needle) != 1:
         raise SystemExit("GPUI build script changed; refusing to apply the cross-build patch.")
     build.write_text(original.replace(needle, replacement))
+    # The studio's own build script embeds this manifest beside its app icon.
+    env["ASSET_FORGE_WINDOWS_MANIFEST"] = str(gpui / "resources/windows/gpui.manifest.xml")
     return gpui
 
 
@@ -166,20 +167,6 @@ def snapshot_source(gpui):
                 records[str(path.relative_to(ROOT))] = sha(path.read_bytes())
     manifest = SOURCE / "Cargo.toml"
     manifest.write_text(manifest.read_text() + f'\n[patch.crates-io]\ngpui = {{ path = {json.dumps(str(gpui))} }}\n')
-    studio_manifest = SOURCE / "crates/forge-studio/Cargo.toml"
-    studio_manifest.write_text(studio_manifest.read_text().replace('[package]\n', '[package]\nbuild = "windows_build.rs"\n', 1))
-    build_script = SOURCE / "crates/forge-studio/windows_build.rs"
-    manifest_data = (gpui / "resources/windows/gpui.manifest.xml").read_bytes()
-    resource = TOOLS / "gpui-manifest.res"
-    # A standard Windows .res record avoids invoking Windows-only mt.exe.
-    # lld-link reads .res directly and embeds the original GPUI manifest.
-    null_header = struct.pack("<IIHHHHIHHII", 0, 32, 0xffff, 0, 0xffff, 0, 0, 0, 0, 0, 0)
-    header = struct.pack("<IIHHHHIHHII", len(manifest_data), 32, 0xffff, 24, 0xffff, 1, 0, 0x30, 0x409, 0, 0)
-    resource.write_bytes(null_header + header + manifest_data + b"\0" * (-len(manifest_data) % 4))
-    build_script.write_text('fn main() {\n'
-                            '    println!("cargo:rustc-link-arg-bin=asset-forge-studio=/manifest:no");\n'
-                            f'    println!("cargo:rustc-link-arg-bin=asset-forge-studio={resource}");\n'
-                            '}\n')
     return records
 
 

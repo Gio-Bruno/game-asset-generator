@@ -19,6 +19,8 @@ VIAddVersionKey /LANG=1033 "FileDescription" "Asset Forge per-user installer"
 VIAddVersionKey /LANG=1033 "LegalCopyright" "Asset Forge contributors"
 
 !define MUI_ABORTWARNING
+!define MUI_ICON "${PACKAGE_DIR}\AssetForge.ico"
+!define MUI_UNICON "${PACKAGE_DIR}\AssetForge.ico"
 !define MUI_FINISHPAGE_RUN "$INSTDIR\asset-forge-studio.exe"
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_LICENSE "${PACKAGE_DIR}\LICENSE"
@@ -73,9 +75,9 @@ Section "Asset Forge" SEC_MAIN
     File /r "${PACKAGE_DIR}\*"
     WriteUninstaller "$INSTDIR\Uninstall.exe"
     CreateDirectory "$SMPROGRAMS\Asset Forge"
-    CreateShortcut "$SMPROGRAMS\Asset Forge\Asset Forge.lnk" "$INSTDIR\asset-forge-studio.exe"
+    CreateShortcut "$SMPROGRAMS\Asset Forge\Asset Forge.lnk" "$INSTDIR\asset-forge-studio.exe" "" "$INSTDIR\AssetForge.ico"
     CreateShortcut "$SMPROGRAMS\Asset Forge\Uninstall.lnk" "$INSTDIR\Uninstall.exe"
-    CreateShortcut "$DESKTOP\Asset Forge.lnk" "$INSTDIR\asset-forge-studio.exe"
+    CreateShortcut "$DESKTOP\Asset Forge.lnk" "$INSTDIR\asset-forge-studio.exe" "" "$INSTDIR\AssetForge.ico"
     WriteRegStr HKCU "Software\AssetForge" "InstallLocation" "$INSTDIR"
     WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\AssetForge" "DisplayName" "Asset Forge"
     WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\AssetForge" "DisplayVersion" "${APP_VERSION}"

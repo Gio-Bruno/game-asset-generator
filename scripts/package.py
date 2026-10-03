@@ -72,7 +72,7 @@ def copy_resources(root, destination):
     shutil.copy2(root / "assets/windows-shaders/LICENSE-APACHE", legal / "GPUI-Apache-2.0.txt")
 
 
-def write_manifest(destination, version, platform, binaries, prebuilt=None, built=False):
+def write_manifest(destination, version, platform, binaries, prebuilt=None, built=False, source_commit=None):
     manifest = {
         "schemaVersion": 1, "version": version, "platform": platform,
         "sha256": {name: sha256(path) for name, path in binaries.items()},
@@ -84,6 +84,8 @@ def write_manifest(destination, version, platform, binaries, prebuilt=None, buil
         manifest["buildProvenance"] = "verified-prebuilt-manifest"
         if "buildUrl" in prebuilt:
             manifest["buildUrl"] = prebuilt["buildUrl"]
+    elif built and source_commit:
+        manifest["sourceCommit"] = source_commit
     (destination / "release-manifest.json").write_text(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
     )
@@ -121,6 +123,7 @@ def package_macos(args, build, stage, dist, version):
     (contents / "MacOS").mkdir(parents=True)
     resources = contents / "Resources"
     copy_resources(ROOT, resources)
+    shutil.copy2(ROOT / "assets/branding/AssetForge.icns", resources / "AssetForge.icns")
     for name in ("asset-forge-studio", "asset-forge"):
         shutil.copy2(build / name, contents / "MacOS" / name)
     with (contents / "Info.plist").open("wb") as stream:
@@ -129,6 +132,7 @@ def package_macos(args, build, stage, dist, version):
             "CFBundleIdentifier": "dev.assetforge.studio", "CFBundleExecutable": "asset-forge-studio",
             "CFBundleVersion": version, "CFBundleShortVersionString": version,
             "CFBundlePackageType": "APPL", "LSMinimumSystemVersion": "12.0",
+            "CFBundleIconFile": "AssetForge.icns",
             "NSHighResolutionCapable": True,
         }, stream)
     subprocess.run(["codesign", "--force", "--deep", "--sign", "-", str(staged_app)], check=True)
@@ -136,7 +140,7 @@ def package_macos(args, build, stage, dist, version):
     # hash in a signed resource would create a circular signature/hash dependency.
     write_manifest(stage, version, "macos-arm64", {
         name: contents / "MacOS" / name for name in ("asset-forge-studio", "asset-forge")
-    }, built=not args.no_build)
+    }, built=not args.no_build, source_commit=args.source_commit)
     app = dist / "Asset Forge.app"
     replace_app(staged_app, app, stage)
     # Replace paths; never truncate an executable that may still be running.
@@ -206,11 +210,13 @@ def package_windows(args, build, stage, dist, version):
             raise ValueError("Compiled CLI version does not match Cargo.toml.")
     payload = stage / "windows"
     copy_resources(ROOT, payload)
+    shutil.copy2(ROOT / "assets/branding/AssetForge.ico", payload / "AssetForge.ico")
     for name in WINDOWS_BINARIES:
         shutil.copy2(build / name, payload / name)
     manifest = write_manifest(payload, version, "windows-x64", {
         name: payload / name for name in WINDOWS_BINARIES
-    }, prebuilt=prebuilt, built=not args.no_build and not args.windows_build)
+    }, prebuilt=prebuilt, built=not args.no_build and not args.windows_build,
+       source_commit=args.source_commit)
     staged_zip = stage / "Asset-Forge-Windows.zip"
     with zipfile.ZipFile(staged_zip, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for path in sorted(payload.rglob("*")):
@@ -253,6 +259,7 @@ def main():
     parser.add_argument("--windows-build", type=pathlib.Path, help="Directory with prebuilt Windows x64 EXEs; implies --no-build.")
     parser.add_argument("--windows-build-manifest", type=pathlib.Path, help="JSON with version, sourceCommit, and both binary hashes.")
     parser.add_argument("--makensis", type=pathlib.Path, help="Explicit path to the NSIS compiler.")
+    parser.add_argument("--source-commit", help="Verify clean native build inputs against a Git commit and record it in the package.")
     args = parser.parse_args()
     platform = args.platform or ({"darwin": "macos", "win32": "windows"}.get(sys.platform))
     if not platform:
@@ -264,6 +271,23 @@ def main():
     if args.windows_build_manifest and not args.windows_build:
         parser.error("--windows-build-manifest requires --windows-build.")
     version = workspace_version(ROOT)
+    if args.source_commit:
+        if args.no_build:
+            parser.error("--source-commit requires a fresh native build; prebuilt outputs use their original manifest.")
+        args.source_commit = subprocess.check_output(
+            ["git", "rev-parse", args.source_commit], cwd=ROOT, text=True,
+        ).strip()
+        if not re.fullmatch(r"[0-9a-f]{40}", args.source_commit):
+            parser.error("--source-commit must resolve to a Git commit.")
+        inputs = ["Cargo.toml", "Cargo.lock", "crates", "assets", "scripts", "README.md", "LICENSE", "docs", "examples"]
+        changed = subprocess.run(
+            ["git", "diff", "--quiet", args.source_commit, "--", *inputs], cwd=ROOT,
+        ).returncode
+        untracked = subprocess.check_output(
+            ["git", "ls-files", "--others", "--exclude-standard", "--", *inputs], cwd=ROOT,
+        ).strip()
+        if changed or untracked:
+            parser.error("Native build/package inputs must match the committed release source.")
     if not args.no_build:
         command = ["cargo", "build", "--locked", "--workspace"]
         if args.profile == "release":

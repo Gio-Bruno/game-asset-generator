@@ -41,6 +41,8 @@ python scripts/smoke_package.py
 
 Version numbers come from `[workspace.package]` in `Cargo.toml`. macOS package metadata and Windows installer metadata use that version. Native packaging checks the compiled CLI's reported version; Windows packages also check both EXEs are PE x64. Output paths are replaced instead of truncating a running executable.
 
+Platform icons are versioned in `assets/branding`. The Mac bundle declares `AssetForge.icns` in `Info.plist`. Windows embeds the multi-size icon in the studio EXE and includes it in installer/uninstaller resources and shortcuts. Icon conversion uses `scripts/prepare_icons.py`; ordinary builds use the saved containers and do not require Pillow. The cross-build uses the same studio icon build script as native Windows while retaining the verified GPUI DPI manifest.
+
 To package verified Windows binaries on macOS, provide their original build manifest. The manifest records the commit that actually produced the EXEs; do not substitute a newer source commit or relabel older binaries as a rebuild. Both hashes and the version must match before packaging proceeds:
 
 ```json
@@ -63,6 +65,8 @@ python3 scripts/package.py --platform windows \
 ```
 
 Every package includes the CLI, README, docs, examples, font licenses, and a release manifest with binary hashes. `--no-build` on native outputs records existing output provenance and does not assert that those files were built from current HEAD. For a publication, build and verify from the intended release commit, or use prebuilt outputs whose original source and hashes have been independently verified.
+
+For a native release build, use `python3 scripts/package.py --source-commit <release-commit>`. This rejects changed or untracked build/package inputs, builds the executables, and records that commit in the package manifest. Prebuilt Windows outputs retain the source commit and hashes from their verified build manifest.
 
 ### Windows build from macOS
 

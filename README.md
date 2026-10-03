@@ -1,5 +1,7 @@
 # Asset Forge
 
+<img src="assets/branding/app-icon.png" alt="Asset Forge application icon" width="96" height="96">
+
 A local 2D game asset workshop for macOS and Windows, powered by your Codex subscription. Tell Forge, your AI art director, about the game. Forge saves its art direction and reusable characters, structures and props, then generates assets and sprite animations with consistent identities and image references.
 
 The interface is native Rust/GPUI. The CLI, stdio API and desktop app share the same typed backend. No web server, API key, Node runtime or separate paid image API is required by Asset Forge.
