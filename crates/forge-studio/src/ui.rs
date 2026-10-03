@@ -72,6 +72,7 @@ pub struct Studio {
     asset_page: usize,
     asset_total: usize,
     animations: Vec<Animation>,
+    animations_loaded: bool,
     animation_id: Option<String>,
     animation_atlas: Option<Asset>,
     animation_config: AnimationConfig,
@@ -224,6 +225,7 @@ impl Studio {
             asset_page: 1,
             asset_total: 0,
             animations: vec![],
+            animations_loaded: false,
             animation_id: None,
             animation_atlas: None,
             animation_config: AnimationConfig::default(),
@@ -342,6 +344,7 @@ impl Studio {
         self.assets.clear();
         self.job = None;
         self.animations.clear();
+        self.animations_loaded = false;
         self.animation_id = None;
         self.animation_atlas = None;
         self.reset_motion(Motion::Idle, window, cx);
@@ -600,8 +603,15 @@ impl Studio {
                     if sheet && self.tab == Tab::Animate {
                         self.animation_id = None;
                         self.show_atlas = true;
+                        self.animation_config.frame_width =
+                            asset.width / self.animation_config.columns;
+                        self.animation_config.frame_height =
+                            asset.height / self.animation_config.rows();
+                        self.animation_config.margin = 0;
+                        self.animation_config.spacing = 0;
+                        self.sync_grid_inputs(window, cx);
                         self.message(
-                            "Sprite sheet imported. Fit its grid, then extract frames.",
+                            "Sheet imported and fitted to the current frame preset. Extract frames, or adjust Clip settings.",
                             false,
                             cx,
                         );
@@ -630,6 +640,8 @@ impl Studio {
             ),
             "animations/list" => {
                 if let Ok(page) = serde_json::from_value::<Page<Animation>>(v) {
+                    let first_load = !self.animations_loaded;
+                    self.animations_loaded = true;
                     let selected = page
                         .data
                         .iter()
@@ -655,7 +667,7 @@ impl Studio {
                         }
                     }
                     self.animations = page.data;
-                    if self.animation_id.is_none() {
+                    if self.animation_id.is_none() && first_load {
                         if let Some(clip) = self.animations.first().cloned() {
                             self.choose_animation(clip, window, cx);
                         }
@@ -1111,7 +1123,6 @@ impl Studio {
             self.animation_config.frame_height = asset.height / self.animation_config.rows();
             self.animation_config.margin = 0;
             self.animation_config.spacing = 0;
-            self.animation_advanced = true;
             self.show_atlas = true;
             self.sync_grid_inputs(window, cx);
             self.message("Grid fitted to the selected sheet. Check cell size and padding, then extract frames.",false,cx);

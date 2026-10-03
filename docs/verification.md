@@ -11,7 +11,7 @@ Checked on 2026-10-03. macOS has been built and exercised. Windows verification 
 | macOS app | Optimized GPUI build, packaged app, ad hoc signing, native dialogs and successful restart | None for the verified local package |
 | Windows app | MSVC paths, portable packaging and GitHub Actions matrix | Windows build and runtime smoke |
 | Simple presets and controls | Six visual directions and six motion presets; detailed output/grid fields behind disclosure; buttons for sizes, timing and looping | Native simplified controls reviewed |
-| Mobbin references | Gamma, Runway, Firefly and Leonardo screens inspected; native result reviewed at 1320 and approximately 1059 logical pixels wide | Minimum 720-pixel height was not exercised |
+| Mobbin references | Gamma, Runway, Firefly and Leonardo screens inspected; native result reviewed at 1320 and approximately 1054 logical pixels wide | Minimum 720-pixel height was not exercised |
 | Guide actions | Real guide created cast and style, generated a sprite and animation, pinned references, and updated timing; native character and timing receipts verified | None for the exercised actions |
 | Sprite/animation generation and setup | Real six-frame transparent walk atlas, PNG extraction, GIF preview and ZIP export; native import, grid fitting, extraction, pause, step and atlas view exercised | Guide timing changes refresh both playback and FPS controls |
 | Image references | Native import and style/character pinning; backend attaches actual same-project pixels | Direct import, thumbnail display and one-click removal verified in Animate |
@@ -23,6 +23,7 @@ Checked on 2026-10-03. macOS has been built and exercised. Windows verification 
 - Release workspace build succeeds.
 - Real guided sprite generation produced a 512 × 512 PNG with actual alpha. Reference pinning and style customization created no extra image job.
 - Real guided walk generation produced a 1536 × 1024 atlas with six 512-pixel cells and actual alpha, plus a GIF and portable ZIP. Its repeated poses illustrate why motion needs visual review.
+- Final import flow: a 1536 × 1024 sheet automatically fitted to six 512-pixel frames, stayed selected despite existing clips, and extracted into successful playback without opening grid fields or pressing Fit.
 - Native app: guide-created Mira, imported atlas, fitted/extracted six frames, paused/stepped playback, displayed atlas and exported a ZIP. The ZIP contains nine files, six frame records and the selected timing.
 - Native direct reference import in Animate adds a removable thumbnail without changing the selected clip or playback. Extra references are sent to the next manual generation.
 - Native PNG export matches the source bytes. Style and character reference buttons persisted the selected image.
