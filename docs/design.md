@@ -1,6 +1,6 @@
 # Asset Forge design
 
-Asset Forge is a native 2D art workshop with an editorial, paper-and-forest palette. IBM Plex Sans provides clear controls; Lora gives the workspace a warmer voice. The primary surfaces are a large canvas, a compact asset composer, and a persistent art director.
+Asset Forge is a native 2D art workshop with an editorial, paper-and-forest palette. IBM Plex Sans provides clear controls; Lora gives the workspace a warmer voice. A dominant preview, a browsable local catalog and a persistent Forge chat are the primary surfaces. The chat handles creation and editing; Library and World make the resulting work easy to inspect.
 
 ## Mobbin references
 
@@ -13,20 +13,26 @@ The connected Mobbin library was searched for AI image workspaces and visual sty
 
 These references inform the interaction patterns. The app's typography, palette, layout, illustrations, and implementation are original. The woodland preview is an actual Codex-generated example included in this repository. Other preset thumbnails are original schematic SVG illustrations, intended to communicate a direction rather than guarantee an exact generated result.
 
-## Guided flow
+## Browse and create
 
-New users can pick a visual preset or choose a game concept in Forge's panel. Forge can establish the style, customize its palette, camera and lighting, and develop the initial cast without making the user complete a long form. It sees only the current project's app context, and acts through typed application tools. Successful actions immediately refresh the visible workspace.
+New game opens a fresh Forge conversation. A developer describes the game, and Forge chooses suitable defaults, saves its art direction and creates the named reusable identities. A tower-defense concept needs structures in its catalog; it does not need an invented main character. Explicitly requesting a separate game in an existing conversation creates and selects a new project while preserving the previous game.
 
-A user can then ask for an asset in chat or use the compact manual composer. Characters default to a square transparent PNG; scenes default to a 1536 × 1024 opaque PNG. Pixel art defaults to 256 pixels; Painterly fantasy sprites default to 1024 pixels; other manual sprites default to 512 pixels. Starter defaults survive style customization. Output settings and custom art-direction fields are available through disclosure controls.
+World shows the saved art direction and Characters, Structures and Props. These read-only summaries let developers check what Forge actually saved. Names, descriptions, categories, palette, camera and lighting are edited through chat. Library shows read-only image and animation lists with a large selected preview, browsing controls and native export dialogs. Creation forms are removed from these surfaces.
 
-The guide may create one image job per permitted user message. Setup suggestions permit no generation. It never automatically repeats uncertain actions. Chat persists in the local workspace, with streaming text and visible action receipts. The generation queue continues independently after the guide explains that an image is rendering.
+The guide acts through typed app tools for project creation, style changes, saved subject creation/editing, reference pinning, image generation, animation generation, sheet extraction and timing changes. Successful actions refresh the visible game and catalog. Characters, structures and props share saved text identity and pinned image references; each image job snapshots those rules. Older character records default to the Character category without rewriting user data.
 
-Projects preserve a saved art direction; characters preserve text identity and pinned image references. Each job snapshots those rules. Developers can review a result, pin it to a style or character, then request another pose or a matching scene. The library stays local and exports PNGs through a native file dialog.
+The developer can ask for a sprite, structure, prop or matching scene without filling in technical settings. Static subjects default to transparent square PNGs; scenes default to a 1536 × 1024 opaque PNG. Pixel art uses smaller sprite defaults and Painterly fantasy uses larger ones. Starter dimensions survive style customization; explicit chat instructions can override output settings through the same backend contract.
 
-## Sprite workshop
+The guide may create one image job per permitted user message. Setup suggestions permit no generation. It never automatically repeats uncertain actions. Chat persists locally with streaming text and visible action receipts; rendering continues independently after Forge reports the queued job.
 
-Animate keeps the large preview and compact composer pattern. Six motion choices set frame count, grid, timing and loop defaults. Character chips select a saved identity, and generation attaches its pinned pixels alongside the project style. A single optional motion brief adds direction without requiring a form.
+## Image revisions
 
-Clips have a playback preview, pause, frame stepping and atlas view. FPS and looping stay visible as small controls. Clip settings disclose frame count, columns, standard cell sizes, rectangular dimensions, margin and spacing. The main view starts with motion, character and one optional brief. Canvas and Animate both offer direct image-reference import with removable thumbnail chips. Import fits the current preset grid automatically; Extract frames creates a clip without spending generation capacity. Fit selected sheet and Clip settings support other grids. Timing changes regenerate only the preview; the image job's original snapshot stays intact.
+Add to chat attaches a library asset to the next Forge message. + Image imports a reference through a native file picker and adds it to the same removable attachment chips. The guide receives the actual image pixels and saved asset metadata, and the generation automatically inherits that message's attachments. The developer can request a concrete change while keeping the selected subject's identity and project style.
 
-The native export dialog writes a portable ZIP containing an atlas, individual PNG frames, GIF preview and JSON metadata. The AI guide uses the same typed animation operations and shared generation allowance.
+Attachments belong to the current message and project. Subsequent messages do not silently inherit them; developers can attach them again or ask Forge to pin them as persistent style or subject references. At most eight images can be combined for a generation. Creating a separate game copies only explicitly attached current-message images into its new library and preserves the old game.
+
+## Animation review
+
+Forge handles Idle, Walk, Run, Jump, Attack and custom animation requests using saved subjects and motion/style defaults. It can also extract frames from an attached sprite sheet using the requested grid, margins and spacing, then change FPS or looping without generating another image. These creation and editing operations happen in chat.
+
+Library provides playback, pause, frame stepping and atlas view for completed clips. The native export dialog writes a portable ZIP containing the atlas, individual PNG frames, GIF preview and JSON timing metadata. Motion quality remains approximate and needs visual review before engine import. The animation operations share the guide's generation allowance and preserve immutable image-job snapshots.

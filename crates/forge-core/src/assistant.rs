@@ -40,6 +40,7 @@ impl Service {
                     thread_id: None,
                     turn_id: None,
                     allow_generation: false,
+                    reference_asset_ids: vec![],
                     generated_job_ids: vec![],
                     turn_job_count: 0,
                     error: None,
@@ -52,15 +53,29 @@ impl Service {
                     "The guide is still working on your last request.",
                 ));
             }
+            if input.reference_asset_ids.len() > 8 {
+                return Err(ApiError::validation(
+                    "Add at most 8 images to a chat message.",
+                ));
+            }
+            if !input.reference_asset_ids.is_empty() {
+                let project = current_project(&session)?;
+                self.store
+                    .validate_references(project, &input.reference_asset_ids)?;
+                let saved: Project = self.store.get("project", project)?;
+                merge_references(&saved.style.reference_asset_ids, &input.reference_asset_ids)?;
+            }
             session.status = AssistantStatus::Thinking;
             session.error = None;
             session.allow_generation = input.allow_generation;
+            session.reference_asset_ids = merge_references(&[], &input.reference_asset_ids)?;
             session.turn_job_count = 0;
             session.thread_id = None;
             session.turn_id = None;
             session.messages.push(ChatMessage {
                 role: "USER".into(),
                 text: input.message,
+                reference_asset_ids: session.reference_asset_ids.clone(),
             });
             if session.messages.len() > 128 {
                 session.messages.drain(..session.messages.len() - 128);
@@ -194,7 +209,18 @@ impl Service {
             u32::from(session.allow_generation),
             session.messages.last().unwrap().text
         );
-        let turn=client.request("turn/start",json!({"threadId":thread_id,"input":[{"type":"text","text":prompt,"text_elements":[]}]})).await?;
+        let mut input = vec![json!({"type":"text","text":prompt,"text_elements":[]})];
+        if !session.reference_asset_ids.is_empty() {
+            for asset in self
+                .store
+                .validate_references(current_project(session)?, &session.reference_asset_ids)?
+            {
+                input.push(json!({"type":"localImage","path":asset.path}));
+            }
+        }
+        let turn = client
+            .request("turn/start", json!({"threadId":thread_id,"input":input}))
+            .await?;
         session.turn_id = Some(
             turn["turn"]["id"]
                 .as_str()
@@ -283,6 +309,7 @@ impl Service {
         session.messages.push(ChatMessage {
             role: "ASSISTANT".into(),
             text: output,
+            reference_asset_ids: vec![],
         });
         session.status = AssistantStatus::Ready;
         Ok(())
@@ -290,8 +317,37 @@ impl Service {
 
     fn guide_context(&self, session: &AssistantSession) -> Result<Value> {
         if let Some(project) = &session.project_id {
+            let attached = self
+                .store
+                .validate_references(project, &session.reference_asset_ids)?;
+            let subjects = self
+                .store
+                .list::<Character>("character", Some(project), 1, 50)?
+                .data;
+            let mut attached_animations = vec![];
+            if !attached.is_empty() {
+                let mut page = 1;
+                loop {
+                    let clips =
+                        self.store
+                            .list::<Animation>("animation", Some(project), page, 100)?;
+                    for clip in clips.data {
+                        if clip
+                            .source_asset_id
+                            .as_ref()
+                            .is_some_and(|id| session.reference_asset_ids.contains(id))
+                        {
+                            attached_animations.push(self.animation(&clip.id)?);
+                        }
+                    }
+                    if page >= clips.pagination.total_pages {
+                        break;
+                    }
+                    page += 1;
+                }
+            }
             Ok(
-                json!({"project":self.store.get::<Project>("project",project)?,"characters":self.store.list::<Character>("character",Some(project),1,50)?.data,"assets":self.store.list::<Asset>("asset",Some(project),1,50)?.data,"animations":self.animation_context(project)?,"recentJobs":self.store.list_jobs(Some(project))?.into_iter().take(5).collect::<Vec<_>>(),"presets":presets::all()}),
+                json!({"project":self.store.get::<Project>("project",project)?,"characters":subjects,"subjects":subjects,"assets":self.store.list::<Asset>("asset",Some(project),1,50)?.data,"attachedReferences":attached,"attachedAnimations":attached_animations,"attachedReferenceUse":"The user added these images to this message. Their actual pixels follow in this order. Use them as the targets for requested revisions; preserve their identity and style except for requested changes. Generation automatically inherits these references. They apply only to the current message and are not permanently pinned.","animations":self.animation_context(project)?,"recentJobs":self.store.list_jobs(Some(project))?.into_iter().take(5).collect::<Vec<_>>(),"presets":presets::all()}),
             )
         } else {
             Ok(json!({"project":null,"presets":presets::all()}))
@@ -319,8 +375,11 @@ impl Service {
         }
         if ![
             "choose_style",
+            "create_game",
             "customize_style",
             "create_character",
+            "create_subject",
+            "update_subject",
             "pin_reference",
             "generate_asset",
             "generate_animation",
@@ -364,8 +423,11 @@ impl Service {
                 session,
                 "ASSISTANT_ACTION",
                 match tool {
+                    "create_game" => "Created and selected your new game.",
                     "choose_style" | "customize_style" => "Saved your project's art direction.",
                     "create_character" => "Added a character to your cast.",
+                    "create_subject" => "Added an identity to your catalog.",
+                    "update_subject" => "Updated your saved subject identity.",
                     "pin_reference" => "Pinned a visual reference for consistency.",
                     "generate_asset" => "Started your asset generation.",
                     "generate_animation" => "Started your sprite animation.",
@@ -386,6 +448,56 @@ impl Service {
         digest: &str,
     ) -> Result<Value> {
         match tool {
+            "create_game" => {
+                let p: CreateGame = decode(args)?;
+                nonempty("projectName", &p.project_name, 120)?;
+                let mut style = presets::get(&p.preset_id)?.style;
+                if let Some(direction) = p.extra_direction {
+                    nonempty("extraDirection", &direction, 4000)?;
+                    style.description.push_str("\nGame-specific direction: ");
+                    style.description.push_str(&direction);
+                }
+                // Only images attached to this message may cross into the new game.
+                // Resolve their saved paths ourselves; the guide cannot choose filesystem paths.
+                let attachments = if session.reference_asset_ids.is_empty() {
+                    vec![]
+                } else {
+                    self.store.validate_references(
+                        current_project(session)?,
+                        &session.reference_asset_ids,
+                    )?
+                };
+                let mut project = self
+                    .dispatch(
+                        "projects/create",
+                        json!({"name":p.project_name,"style":style}),
+                    )
+                    .await?;
+                let project_id = project["id"].as_str().unwrap().to_owned();
+                let mut copied = Vec::with_capacity(attachments.len());
+                let mut reference_map = serde_json::Map::new();
+                for asset in attachments {
+                    let imported = self.dispatch("assets/import", json!({
+                        "projectId":project_id,"path":asset.path,"name":asset.name,"kind":asset.kind
+                    })).await?;
+                    let copied_id = imported["id"].as_str().unwrap().to_owned();
+                    reference_map.insert(asset.id, json!(copied_id));
+                    copied.push(copied_id);
+                }
+                session.project_id = Some(project_id);
+                session.reference_asset_ids = copied;
+                if let Some(message) = session.messages.last_mut()
+                    && message.role == "USER"
+                {
+                    message.reference_asset_ids = session.reference_asset_ids.clone();
+                }
+                project["referenceAssetIdMap"] = Value::Object(reference_map);
+                project["attachedReferences"] = json!(self.store.validate_references(
+                    current_project(session)?,
+                    &session.reference_asset_ids
+                )?);
+                Ok(project)
+            }
             "choose_style" => {
                 let p: ChooseStyle = decode(args)?;
                 let mut style = presets::get(&p.preset_id)?.style;
@@ -448,6 +560,28 @@ impl Service {
                     json!({"projectId":project,"name":p.name,"description":p.description}),
                 )
                 .await
+            }
+            "create_subject" => {
+                let p: NewSubject = decode(args)?;
+                self.dispatch(
+                    "characters/create",
+                    json!({
+                        "projectId":current_project(session)?,
+                        "name":p.name,"description":p.description,"kind":p.kind
+                    }),
+                )
+                .await
+            }
+            "update_subject" => {
+                let p: UpdateCharacter = decode(args)?;
+                let saved: Character = self.store.get("character", &p.id)?;
+                if saved.project_id != current_project(session)? {
+                    return Err(ApiError::new(
+                        "ACTION_DENIED",
+                        "Choose a subject in the current project.",
+                    ));
+                }
+                self.dispatch("characters/update", json!(p)).await
             }
             "pin_reference" => {
                 let p: PinReference = decode(args)?;
@@ -522,7 +656,7 @@ impl Service {
                             idempotency_key: format!("guide:{digest}"),
                             config,
                             prompt: p.prompt,
-                            reference_asset_ids: vec![],
+                            reference_asset_ids: session.reference_asset_ids.clone(),
                         }),
                     )
                     .await?;
@@ -575,7 +709,10 @@ impl Service {
                     prompt: p.prompt,
                     kind: p.kind,
                     character_id: p.character_id,
-                    reference_asset_ids: p.reference_asset_ids,
+                    reference_asset_ids: merge_references(
+                        &session.reference_asset_ids,
+                        &p.reference_asset_ids,
+                    )?,
                     width: p.width.unwrap_or(width),
                     height: p.height.unwrap_or(height),
                     transparent_background: p.transparent_background.unwrap_or(!scene),
@@ -591,6 +728,21 @@ impl Service {
             _ => Err(ApiError::new("ACTION_DENIED", "Unsupported guide action.")),
         }
     }
+}
+
+fn merge_references(current: &[String], added: &[String]) -> Result<Vec<String>> {
+    let mut merged = current.to_vec();
+    for asset in added {
+        if !merged.contains(asset) {
+            merged.push(asset.clone());
+        }
+    }
+    if merged.len() > 8 {
+        return Err(ApiError::validation(
+            "The combined references exceed 8 images.",
+        ));
+    }
+    Ok(merged)
 }
 
 fn current_project(session: &AssistantSession) -> Result<&str> {
@@ -624,6 +776,14 @@ struct ChooseStyle {
     extra_direction: Option<String>,
 }
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreateGame {
+    preset_id: String,
+    project_name: String,
+    #[serde(default)]
+    extra_direction: Option<String>,
+}
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CustomizeStyle {
     #[serde(default)]
@@ -642,6 +802,13 @@ struct CustomizeStyle {
 struct NewCharacter {
     name: String,
     description: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NewSubject {
+    name: String,
+    description: String,
+    kind: SubjectKind,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -696,7 +863,14 @@ struct GuideSetup {
     config: AnimationConfig,
 }
 
-const GUIDE_INSTRUCTIONS: &str = "You are Forge, a concise, thoughtful art director inside a local 2D game asset app. Help indie developers establish a consistent style, cast and world. You can actually change the current project using the provided app tools. Prefer sensible preset defaults; ask at most one question only when a missing detail is essential. First inspect the supplied workspace. If the user asks to set up a game, choose a suitable preset and create its project and initial character yourself. If they request their own palette, visual language, camera or lighting, use customize_style to save those changes, preserving their current references. If they ask for an image, set up missing style/identity, then call generate_asset exactly once. For sprite motion or animation requests, use generate_animation instead, with a saved character and preset timing. For existing sprite sheets, setup_animation extracts the specified grid without using image generation. Use set_animation_timing for playback edits. Defaults are six frames in three columns, at eight FPS, with cell size chosen from the saved style; run uses twelve FPS and jump/attack play once. Never claim exact motion quality before the user previews it. Never generate for a request that only asks for advice. Do not use native image generation yourself; the app's generation tool owns the image job. Never use shell, filesystem, MCP, external apps, web search, or subagents. Never export files or change unrelated projects. The tool allowance applies only to the current user message, never historical requests. Once a job is queued, explain briefly that it is rendering; do not poll or wait for it. Preserve existing identities and pin known successful character images when creating variations. Do not invent asset IDs or claim an action succeeded without a successful tool result. On uncertain results, tell the user to check the workspace instead of repeating an action. Use null for animation overrides unless the user specifies them; preserve the style defaults. Keep replies under 100 words, use plain prose without Markdown syntax, and suggest one useful next step.";
+const GUIDE_INSTRUCTIONS: &str = concat!(
+    "You are Forge, a concise, thoughtful art director inside a local 2D game asset app. Help indie developers establish a consistent style, catalog and world. You can actually change the current project using the provided app tools. Prefer sensible preset defaults; ask at most one question only when a missing detail is essential. First inspect the supplied workspace. ",
+    "If the user explicitly asks for a new game, use create_game to create and select a separate project even when an existing game is open. choose_style changes the current game's style and must never replace an old game when a new one was requested. create_game preserves the old game and copies only current-message attached images into the new game. Its result includes attachedReferences and referenceAssetIdMap: use the returned new IDs for subsequent tool calls; old IDs belong to the old game. Generation already inherits copied attachments, so referenceAssetIds can be empty unless adding other images. If setting up the current game, choose a suitable preset, create its project if needed and save the initial reusable subjects yourself. Save every named character, tower, building, defense or item with create_subject: kind CHARACTER for characters, STRUCTURE for towers and buildings, PROP for objects. A tower-defense game needs saved structures, not an invented hero. Reuse an existing matching catalog subject; use update_subject to edit its description or classification instead of duplicating it. Never merely describe requested identities as created: they must be saved by a successful app tool. ",
+    "If they request their own palette, visual language, camera or lighting, use customize_style to save those changes, preserving their current references. If they ask for an image, save missing style/subject identity, then call generate_asset exactly once with that saved subject's id as characterId. Structures and props use PROP asset output kind; the catalog subject retains its own kind. ",
+    "Current-message attachedReferences are visual revision targets. Inspect their pixels and preserve their identity and saved style except for requested changes. The app automatically passes these images to generation. Attachments and generation permission apply only to the current user message, never historical requests. ",
+    "For sprite motion or animation requests, use generate_animation instead, with a saved subject and preset timing. For existing sprite sheets, setup_animation extracts the specified grid without using image generation. Use set_animation_timing for playback edits. Defaults are six frames in three columns, at eight FPS, with cell size chosen from the saved style; run uses twelve FPS and jump/attack play once. Never claim exact motion quality before the user previews it. ",
+    "Never generate for a request that only asks for advice. Do not use native image generation yourself; the app's generation tool owns the image job. Never use shell, filesystem, MCP, external apps, web search, or subagents. Never export files or change unrelated projects. Once a job is queued, explain briefly that it is rendering; do not poll or wait for it. Preserve existing identities and pin known successful subject images when creating variations. Do not invent asset IDs or claim an action succeeded without a successful tool result. On uncertain results, tell the user to check the workspace instead of repeating an action. Use null for animation overrides unless the user specifies them; preserve the style defaults. Keep replies under 100 words, use plain prose without Markdown syntax, and suggest one useful next step."
+);
 
 fn tool_specs() -> Vec<Value> {
     let string = json!({"type":"string"});
@@ -721,13 +895,320 @@ fn tool_specs() -> Vec<Value> {
     );
     vec![
         json!({"type":"function","name":"workspace_context","description":"Read the current project's style, characters, assets and jobs. Scope is fixed by the app.","inputSchema":schema(json!({}),vec![])}),
+        json!({"type":"function","name":"create_game","description":"Create and select a separate game when the user explicitly requests a new game. Never modifies the previously open game. Copies only images attached to the current message into the new game so they remain usable; historical references stay in the old game. Choose a sensible name and preset.","inputSchema":schema(json!({"presetId":{"type":"string","enum":["woodland","pixel","flat","ink","paint","isometric"]},"projectName":string,"extraDirection":optional_string}),vec!["presetId","projectName","extraDirection"])}),
         json!({"type":"function","name":"choose_style","description":"Apply a style preset to the current project, or create a project if none exists. Existing character identities are preserved.","inputSchema":schema(json!({"presetId":{"type":"string","enum":["woodland","pixel","flat","ink","paint","isometric"]},"projectName":optional_string,"extraDirection":optional_string}),vec!["presetId","projectName","extraDirection"])}),
         json!({"type":"function","name":"customize_style","description":"Customize the current project's saved art direction. Supply only requested changes and null for unchanged fields. Keeps starter preset defaults and all pinned references. Create a project with choose_style first if needed.","inputSchema":schema(json!({"name":optional_string,"description":optional_string,"palette":{"type":["array","null"],"items":{"type":"string"},"maxItems":16},"perspective":optional_string,"lighting":optional_string}),vec!["name","description","palette","perspective","lighting"])}),
-        json!({"type":"function","name":"create_character","description":"Save a new character identity in the current project. Use only when the cast does not already contain this character.","inputSchema":schema(json!({"name":string,"description":string}),vec!["name","description"])}),
-        json!({"type":"function","name":"pin_reference","description":"Pin an existing image in this project as a character reference, or as a style reference if characterId is null.","inputSchema":schema(json!({"assetId":string,"characterId":optional_string}),vec!["assetId","characterId"])}),
+        json!({"type":"function","name":"create_character","description":"Save a new CHARACTER identity in the current project. Use create_subject for structures and props. Reuse an existing catalog identity instead of duplicating it.","inputSchema":schema(json!({"name":string,"description":string}),vec!["name","description"])}),
+        json!({"type":"function","name":"create_subject","description":"Save a reusable CHARACTER, STRUCTURE or PROP identity in the current project's catalog. Towers, buildings and defenses are STRUCTURE; items and objects are PROP. Save each named design before rendering it. Reuse existing subjects instead of duplicating them.","inputSchema":schema(json!({"name":string,"description":string,"kind":{"type":"string","enum":["CHARACTER","STRUCTURE","PROP"]}}),vec!["name","description","kind"])}),
+        json!({"type":"function","name":"update_subject","description":"Edit the saved name, visual identity or category of a subject in the current project. Null leaves a field unchanged; all pinned images and style references are preserved. This changes text identity, not existing images.","inputSchema":schema(json!({"id":string,"name":optional_string,"description":optional_string,"kind":{"type":["string","null"],"enum":["CHARACTER","STRUCTURE","PROP",null]}}),vec!["id","name","description","kind"])}),
+        json!({"type":"function","name":"pin_reference","description":"Pin an existing image in this project as a saved subject reference (character, structure or prop), or as a style reference if characterId is null.","inputSchema":schema(json!({"assetId":string,"characterId":optional_string}),vec!["assetId","characterId"])}),
         json!({"type":"function","name":"generate_animation","description":"Generate one transparent sprite animation from the saved character and style. Shares the one-image-per-message allowance. Null overrides use motion and style defaults. Returns a queued clip tracked by the app.","inputSchema":schema(json!({"characterId":string,"motion":motion,"name":optional_string,"prompt":string,"frameCount":optional_integer,"columns":optional_integer,"frameSize":optional_integer,"fps":optional_integer,"isLooping":{"type":["boolean","null"]}}),vec!["characterId","motion","name","prompt","frameCount","columns","frameSize","fps","isLooping"])}),
         json!({"type":"function","name":"setup_animation","description":"Extract sequential frames from an existing sprite sheet in this project. No image generation. Specify the exact row-major grid, cell dimensions, margin, spacing and timing.","inputSchema":schema(json!({"assetId":string,"characterId":optional_string,"config":config_schema}),vec!["assetId","characterId","config"])}),
         json!({"type":"function","name":"set_animation_timing","description":"Set the FPS and looping of a completed animation in this project, without generating images.","inputSchema":schema(json!({"id":string,"fps":{"type":"integer"},"isLooping":{"type":"boolean"}}),vec!["id","fps","isLooping"])}),
         json!({"type":"function","name":"generate_asset","description":"Queue one game asset using saved style and character references. At most one generation per permitted user message. Returns immediately; the UI tracks rendering.","inputSchema":schema(json!({"kind":{"type":"string","enum":["CHARACTER","SCENE","PROP","SPRITE_SHEET"]},"prompt":string,"characterId":optional_string,"referenceAssetIds":{"type":"array","items":{"type":"string"}},"width":{"type":["integer","null"]},"height":{"type":["integer","null"]},"transparentBackground":{"type":["boolean","null"]}}),vec!["kind","prompt","characterId","referenceAssetIds","width","height","transparentBackground"])}),
     ]
+}
+
+#[cfg(test)]
+mod subject_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn guide_new_game_preserves_old_game_and_copies_only_current_attachments() {
+        let tmp = tempfile::tempdir().unwrap();
+        let service = Service::open(tmp.path().join("data")).unwrap();
+        let old = service
+            .dispatch(
+                "projects/create",
+                json!({
+                    "name":"Old game","style":{"name":"Old ink","description":"Amber line art"}
+                }),
+            )
+            .await
+            .unwrap();
+        let source = tmp.path().join("tower.png");
+        image::RgbaImage::from_pixel(16, 24, image::Rgba([80, 100, 30, 255]))
+            .save(&source)
+            .unwrap();
+        let attached = service
+            .dispatch(
+                "assets/import",
+                json!({
+                    "projectId":old["id"],"path":source,"name":"Tower","kind":"PROP"
+                }),
+            )
+            .await
+            .unwrap();
+        let mut session: AssistantSession = serde_json::from_value(json!({
+            "id":"new-game-guide","projectId":old["id"],"status":"THINKING",
+            "messages":[{"role":"USER","text":"Start a new pixel tower defense game","referenceAssetIds":[attached["id"]]}],
+            "threadId":"thread","turnId":"turn","allowGeneration":false,"referenceAssetIds":[attached["id"]],
+            "generatedJobIds":[],"turnJobCount":0,"error":null,"createdAt":0
+        })).unwrap();
+        let action = json!({
+            "turnId":"turn","callId":"new-game","tool":"create_game",
+            "arguments":{"projectName":"Pixel towers","presetId":"pixel","extraDirection":null}
+        });
+        let new = service.guide_tool(&mut session, &action).await.unwrap();
+        assert_ne!(new["id"], old["id"]);
+        assert_eq!(session.project_id.as_deref(), new["id"].as_str());
+        assert_eq!(new["name"], "Pixel towers");
+        assert_eq!(new["style"]["presetId"], "pixel");
+        assert_eq!(new["style"]["referenceAssetIds"], json!([]));
+        assert_eq!(
+            service
+                .dispatch("projects/get", json!({"id":old["id"]}))
+                .await
+                .unwrap(),
+            old
+        );
+        assert_eq!(session.reference_asset_ids.len(), 1);
+        assert_eq!(
+            new["attachedReferences"][0]["id"],
+            session.reference_asset_ids[0]
+        );
+        assert_eq!(
+            new["referenceAssetIdMap"][attached["id"].as_str().unwrap()],
+            session.reference_asset_ids[0]
+        );
+        let contract: Project = serde_json::from_value(new.clone()).unwrap();
+        assert_eq!(contract.id, new["id"].as_str().unwrap());
+        assert_ne!(
+            session.reference_asset_ids[0],
+            attached["id"].as_str().unwrap()
+        );
+        let copied: Asset = service
+            .store
+            .get("asset", &session.reference_asset_ids[0])
+            .unwrap();
+        assert_eq!(copied.project_id, new["id"].as_str().unwrap());
+        assert_eq!(
+            std::fs::read(&copied.path).unwrap(),
+            std::fs::read(attached["path"].as_str().unwrap()).unwrap()
+        );
+        assert_eq!(
+            session.messages.last().unwrap().reference_asset_ids,
+            session.reference_asset_ids
+        );
+        assert_eq!(
+            service.guide_tool(&mut session, &action).await.unwrap(),
+            new
+        );
+        assert_eq!(
+            service.dispatch("projects/list", json!({})).await.unwrap()["data"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            service
+                .dispatch("assets/list", json!({"projectId":new["id"]}))
+                .await
+                .unwrap()["data"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn guide_saves_and_updates_structures_without_duplicate_or_cross_project_actions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let service = Service::open(tmp.path()).unwrap();
+        let mut session: AssistantSession = serde_json::from_value(json!({
+            "id":"guide-catalog","projectId":null,"status":"THINKING","messages":[],
+            "threadId":"thread","turnId":"turn","allowGeneration":false,
+            "generatedJobIds":[],"turnJobCount":0,"error":null,"createdAt":0
+        }))
+        .unwrap();
+        service
+            .guide_tool(
+                &mut session,
+                &json!({
+                    "turnId":"turn","callId":"style","tool":"choose_style",
+                    "arguments":{"presetId":"woodland","projectName":"Tower defense"}
+                }),
+            )
+            .await
+            .unwrap();
+        let action = json!({
+            "turnId":"turn","callId":"tower","tool":"create_subject",
+            "arguments":{"name":"Arrow tower","description":"Wooden platform with amber banner","kind":"STRUCTURE"}
+        });
+        let tower = service.guide_tool(&mut session, &action).await.unwrap();
+        assert_eq!(tower["kind"], "STRUCTURE");
+        assert_eq!(
+            service.guide_tool(&mut session, &action).await.unwrap()["id"],
+            tower["id"]
+        );
+        let updated = service.guide_tool(&mut session, &json!({
+            "turnId":"turn","callId":"tower-edit","tool":"update_subject",
+            "arguments":{"id":tower["id"],"description":"Wooden platform with teal banner","name":null,"kind":null}
+        })).await.unwrap();
+        assert_eq!(updated["kind"], "STRUCTURE");
+        assert_eq!(updated["description"], "Wooden platform with teal banner");
+        assert_eq!(
+            service
+                .dispatch("characters/list", json!({"projectId":session.project_id}))
+                .await
+                .unwrap()["data"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            service
+                .dispatch("jobs/list", json!({"projectId":session.project_id}))
+                .await
+                .unwrap()["data"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        let other = service
+            .dispatch(
+                "projects/create",
+                json!({"name":"Other","style":{"name":"Ink","description":"Ink"}}),
+            )
+            .await
+            .unwrap();
+        let other_subject = service.dispatch("characters/create", json!({"projectId":other["id"],"name":"Other tower","description":"Stone","kind":"STRUCTURE"})).await.unwrap();
+        let error = service
+            .guide_tool(
+                &mut session,
+                &json!({
+                    "turnId":"turn","callId":"other-edit","tool":"update_subject",
+                    "arguments":{"id":other_subject["id"],"name":"Denied"}
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "ACTION_DENIED");
+        assert_eq!(
+            service
+                .dispatch("characters/get", json!({"id":other_subject["id"]}))
+                .await
+                .unwrap()["name"],
+            "Other tower"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn save_asset(service: &Service, project: &Project, name: &str) -> Asset {
+        let asset = Asset {
+            id: id(),
+            project_id: project.id.clone(),
+            job_id: None,
+            character_id: None,
+            kind: AssetKind::Prop,
+            name: name.into(),
+            path: service
+                .store
+                .root
+                .join("assets")
+                .join(format!("{name}.png"))
+                .to_string_lossy()
+                .into(),
+            width: 64,
+            height: 64,
+            has_alpha: true,
+            created_at: now(),
+        };
+        service
+            .store
+            .put("asset", &asset.id, Some(&project.id), &asset)
+            .unwrap();
+        asset
+    }
+
+    fn save_project(service: &Service, name: &str) -> Project {
+        let project = Project {
+            id: id(),
+            name: name.into(),
+            style: presets::get("isometric").unwrap().style,
+            created_at: now(),
+        };
+        service
+            .store
+            .put("project", &project.id, Some(&project.id), &project)
+            .unwrap();
+        project
+    }
+
+    #[tokio::test]
+    async fn chat_reference_scope_and_combined_limit_fail_before_codex_starts() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = Service::open(temp.path()).unwrap();
+        let mut project = save_project(&service, "Towers");
+        let foreign = save_project(&service, "Another game");
+        let foreign_asset = save_asset(&service, &foreign, "Foreign tower");
+        let mut input: AssistantInput = serde_json::from_value(json!({"requestId":"wrong-project","projectId":project.id,"message":"Change this","referenceAssetIds":[foreign_asset.id]})).unwrap();
+        assert_eq!(
+            service
+                .start_assistant(input.clone())
+                .await
+                .unwrap_err()
+                .code,
+            "VALIDATION_ERROR"
+        );
+        input.reference_asset_ids.clear();
+        assert_eq!(
+            service.start_assistant(input).await.unwrap_err().code,
+            "IDEMPOTENCY_CONFLICT"
+        );
+
+        for index in 0..8 {
+            project
+                .style
+                .reference_asset_ids
+                .push(save_asset(&service, &project, &format!("Pinned {index}")).id);
+        }
+        service
+            .store
+            .put("project", &project.id, Some(&project.id), &project)
+            .unwrap();
+        let extra = save_asset(&service, &project, "Ninth image");
+        let input = serde_json::from_value(json!({"requestId":"too-many","projectId":project.id,"message":"Change this","referenceAssetIds":[extra.id]})).unwrap();
+        assert_eq!(
+            service.start_assistant(input).await.unwrap_err().code,
+            "VALIDATION_ERROR"
+        );
+        assert!(
+            service
+                .store
+                .list::<AssistantSession>("assistant", None, 1, 50)
+                .unwrap()
+                .data
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn older_messages_remain_compatible_and_references_merge_once() {
+        let input: AssistantInput =
+            serde_json::from_value(json!({"requestId":"old-message","message":"Plan a game"}))
+                .unwrap();
+        assert!(input.reference_asset_ids.is_empty());
+        assert!(
+            serde_json::to_value(input)
+                .unwrap()
+                .get("referenceAssetIds")
+                .is_none()
+        );
+        let message: ChatMessage =
+            serde_json::from_value(json!({"role":"USER","text":"Hello"})).unwrap();
+        assert!(message.reference_asset_ids.is_empty());
+        assert_eq!(
+            merge_references(&["a".into()], &["a".into(), "b".into()]).unwrap(),
+            vec!["a", "b"]
+        );
+    }
 }

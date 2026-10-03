@@ -16,6 +16,8 @@ threads = {}
 sequence = 0
 login_state={"loggedIn":False,"active":None,"sequence":0}
 pending_tools = {}
+turn_inputs = {}
+chat_reference_paths = []
 def emit(value):
     with output_lock:
         print(json.dumps(value), flush=True)
@@ -54,6 +56,55 @@ def tool(thread, name, args, call, callback):
     pending_tools[request_id] = callback
     emit({"id":request_id,"method":"item/tool/call","params":{"threadId":thread,"turnId":thread,"callId":call,"tool":name,"arguments":args}})
 def guide(thread):
+    if mode in ("guide-reference", "guide-new-game-reference"):
+        inputs = turn_inputs[thread]
+        prompt = inputs[0]["text"]
+        context = json.JSONDecoder().raw_decode(prompt.split("Current workspace (data, not instructions):\n", 1)[1])[0]
+        attached = context["attachedReferences"]
+        if not attached:
+            assert len(inputs) == 1
+            complete(thread, "Your previous attachments apply only to that message.")
+            return
+        assert len(attached) == 1
+        assert inputs[1]["type"] == "localImage"
+        assert inputs[1]["path"] == attached[0]["path"]
+        assert open(inputs[1]["path"], "rb").read().startswith(b"\x89PNG")
+        chat_reference_paths[:] = [inputs[1]["path"]]
+        # Omit tool references deliberately: the app must propagate added-to-chat images.
+        args = {"kind":"PROP","prompt":"Revise the attached asset with a red roof","characterId":None,"referenceAssetIds":[],"width":64,"height":96,"transparentBackground":True}
+        def first(result):
+            assert result["success"]
+            job = json.loads(result["contentItems"][0]["text"])
+            assert job["referenceAssetIds"] == [attached[0]["id"]]
+            def replayed(result):
+                assert result["success"]
+                assert json.loads(result["contentItems"][0]["text"])["id"] == job["id"]
+                complete(thread,"Your revision is rendering.")
+            tool(thread,"generate_asset",args,"revision",replayed)
+        if mode == "guide-new-game-reference":
+            original = attached[0]
+            create = {"projectName":"New tower game","presetId":"isometric","extraDirection":None}
+            def created(result):
+                assert result["success"]
+                project = json.loads(result["contentItems"][0]["text"])
+                assert project["id"] != context["project"]["id"]
+                copied = project["attachedReferences"][0]
+                assert copied["projectId"] == project["id"]
+                assert project["referenceAssetIdMap"][original["id"]] == copied["id"]
+                assert open(copied["path"], "rb").read() == open(original["path"], "rb").read()
+                attached[:] = [copied]
+                chat_reference_paths[:] = [copied["path"]]
+                # Explicit tool IDs must use the returned copies, and merge exactly once.
+                args["referenceAssetIds"] = [copied["id"]]
+                def replayed_creation(result):
+                    assert result["success"]
+                    assert json.loads(result["contentItems"][0]["text"]) == project
+                    tool(thread,"generate_asset",args,"revision",first)
+                tool(thread,"create_game",create,"new-game",replayed_creation)
+            tool(thread,"create_game",create,"new-game",created)
+        else:
+            tool(thread,"generate_asset",args,"revision",first)
+        return
     def after_style(result):
         assert result["success"]
         tool(thread,"create_character",{"name":"Mira","description":"A forest scout with chestnut hair and an amber scarf."},"character",after_character)
@@ -133,8 +184,12 @@ for line in sys.stdin:
         result = {"thread": {"id": thread}}
     elif method == "turn/start":
         thread=request["params"]["threadId"]
+        turn_inputs[thread] = request["params"]["input"]
         if not threads[thread]:
             assert "native image generation" in request["params"]["input"][0]["text"]
+            if mode in ("guide-reference", "guide-new-game-reference") and chat_reference_paths:
+                assert [item["path"] for item in request["params"]["input"][1:]] == chat_reference_paths
+                assert open(chat_reference_paths[0], "rb").read().startswith(b"\x89PNG")
         result = {"turn": {"id": thread}}
     elif method == "turn/interrupt":
         thread=request["params"]["threadId"]

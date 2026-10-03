@@ -211,8 +211,38 @@ impl Service {
                         project_id: p.project_id,
                         name: p.name,
                         description: p.description,
+                        kind: p.kind,
                         reference_asset_ids: p.reference_asset_ids,
                     };
+                    self.store
+                        .put("character", &c.id, Some(&c.project_id), &c)?;
+                    encode(c)
+                }
+                "characters/get" => {
+                    let p: IdInput = decode(params)?;
+                    encode(self.store.get::<Character>("character", &p.id)?)
+                }
+                "characters/update" => {
+                    let p: UpdateCharacter = decode(params)?;
+                    if p.name.is_none() && p.description.is_none() && p.kind.is_none() {
+                        return Err(ApiError::validation("Specify at least one subject change."));
+                    }
+                    if let Some(name) = &p.name {
+                        nonempty("name", name, 120)?;
+                    }
+                    if let Some(description) = &p.description {
+                        nonempty("description", description, 8000)?;
+                    }
+                    let mut c: Character = self.store.get("character", &p.id)?;
+                    if let Some(name) = p.name {
+                        c.name = name;
+                    }
+                    if let Some(description) = p.description {
+                        c.description = description;
+                    }
+                    if let Some(kind) = p.kind {
+                        c.kind = kind;
+                    }
                     self.store
                         .put("character", &c.id, Some(&c.project_id), &c)?;
                     encode(c)
@@ -835,5 +865,147 @@ mod tests {
             "EXPORT_ERROR"
         );
         assert_eq!(image::open(out).unwrap().dimensions(), (32, 48));
+    }
+
+    #[tokio::test]
+    async fn catalog_subjects_persist_and_identity_updates_preserve_references() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("data");
+        let s = Service::open(&workspace).unwrap();
+        let project = s
+            .dispatch(
+                "projects/create",
+                json!({
+                    "name":"Tower defense","style":{"name":"Ink","description":"Green outlines"}
+                }),
+            )
+            .await
+            .unwrap();
+        let character = s
+            .dispatch(
+                "characters/create",
+                json!({
+                    "projectId":project["id"],"name":"Scout","description":"Amber scarf"
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(character["kind"], "CHARACTER");
+        let tower = s.dispatch("characters/create", json!({
+            "projectId":project["id"],"name":"Arrow tower","description":"Timber platform","kind":"STRUCTURE"
+        })).await.unwrap();
+        let prop = s.dispatch("characters/create", json!({
+            "projectId":project["id"],"name":"Gem","description":"Green crystal","kind":"PROP"
+        })).await.unwrap();
+        assert_eq!(prop["kind"], "PROP");
+        let source = tmp.path().join("tower.png");
+        image::RgbaImage::from_pixel(16, 16, image::Rgba([40, 80, 30, 255]))
+            .save(&source)
+            .unwrap();
+        let image = s
+            .dispatch(
+                "assets/import",
+                json!({
+                    "projectId":project["id"],"path":source,"name":"Tower reference","kind":"PROP"
+                }),
+            )
+            .await
+            .unwrap();
+        s.dispatch(
+            "characters/references/update",
+            json!({
+                "id":tower["id"],"referenceAssetIds":[image["id"]]
+            }),
+        )
+        .await
+        .unwrap();
+        let updated = s
+            .dispatch(
+                "characters/update",
+                json!({
+                    "id":tower["id"],"description":"Timber platform with green trim"
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated["kind"], "STRUCTURE");
+        assert_eq!(updated["name"], "Arrow tower");
+        assert_eq!(updated["referenceAssetIds"], json!([image["id"]]));
+        assert_eq!(
+            s.dispatch("projects/get", json!({"id":project["id"]}))
+                .await
+                .unwrap()["style"],
+            project["style"]
+        );
+        let request: GenerateInput = serde_json::from_value(json!({
+            "projectId":project["id"],"idempotencyKey":"tower-front","prompt":"Front view", "kind":"PROP",
+            "characterId":tower["id"],"width":512,"height":512,"transparentBackground":true
+        })).unwrap();
+        let (snapshot, _) = s.store.claim_job(request).unwrap();
+        assert_eq!(
+            snapshot.character_snapshot.as_ref().unwrap().kind,
+            SubjectKind::Structure
+        );
+        assert_eq!(
+            snapshot.reference_asset_ids,
+            vec![image["id"].as_str().unwrap()]
+        );
+        let prompt = crate::prompt::generation_prompt(&snapshot);
+        assert!(prompt.contains("Structure identity") && prompt.contains("architecture"));
+        assert!(!prompt.contains("preserve face"));
+        assert_eq!(
+            s.dispatch("characters/update", json!({"id":tower["id"]}))
+                .await
+                .unwrap_err()
+                .code,
+            "VALIDATION_ERROR"
+        );
+        assert_eq!(
+            s.dispatch(
+                "characters/update",
+                json!({"id":tower["id"],"kind":"BUILDING"})
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "VALIDATION_ERROR"
+        );
+        // Old stored JSON has no kind field and needs no destructive migration.
+        let mut legacy = character.clone();
+        legacy.as_object_mut().unwrap().remove("kind");
+        s.store
+            .put(
+                "character",
+                character["id"].as_str().unwrap(),
+                project["id"].as_str(),
+                &legacy,
+            )
+            .unwrap();
+        drop(s);
+        let reopened = Service::open(&workspace).unwrap();
+        assert_eq!(
+            reopened
+                .dispatch("characters/get", json!({"id":character["id"]}))
+                .await
+                .unwrap()["kind"],
+            "CHARACTER"
+        );
+        assert_eq!(
+            reopened
+                .dispatch("characters/get", json!({"id":tower["id"]}))
+                .await
+                .unwrap(),
+            updated
+        );
+        assert_eq!(
+            reopened
+                .dispatch("characters/list", json!({"projectId":project["id"]}))
+                .await
+                .unwrap()["data"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
     }
 }

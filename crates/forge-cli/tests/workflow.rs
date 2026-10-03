@@ -278,6 +278,107 @@ fn guide_actions_are_scoped_and_replayed_without_duplicate_characters_or_images(
         assert_eq!(api.call("assistant/message",json!({"requestId":"scope-2","sessionId":id,"projectId":foreign,"message":"Change another game"}))["error"]["code"],"VALIDATION_ERROR");
     }
 }
+
+#[test]
+fn chat_attachments_supply_pixels_and_revision_references_for_one_message() {
+    let mut api = Api::new("guide-reference");
+    let project = api.project();
+    let original = api.create(&project);
+    let original = api.wait(original["id"].as_str().unwrap());
+    assert_eq!(original["status"], "SUCCEEDED");
+    let reference = original["assetIds"][0].clone();
+    let input = json!({"requestId":"revision-1","projectId":project,"message":"Give this structure a red roof","allowGeneration":true,"referenceAssetIds":[reference]});
+    let accepted = api.call("assistant/message", input.clone())["result"].clone();
+    let id = accepted["id"].as_str().unwrap();
+    let done = api.wait_guide(id);
+    assert_eq!(done["status"], "READY", "{done}");
+    assert_eq!(done["referenceAssetIds"], json!([reference]));
+    assert_eq!(done["messages"][0]["referenceAssetIds"], json!([reference]));
+    assert_eq!(done["turnJobCount"], 1);
+    let job = api.wait(done["generatedJobIds"][0].as_str().unwrap());
+    assert_eq!(job["status"], "SUCCEEDED", "{job}");
+    assert_eq!(job["request"]["referenceAssetIds"], json!([reference]));
+    assert_eq!(job["referenceAssetIds"], json!([reference]));
+    assert_eq!(
+        api.call("assistant/message", input.clone())["result"]["id"],
+        id
+    );
+    let mut changed = input;
+    changed["referenceAssetIds"] = json!([]);
+    assert_eq!(
+        api.call("assistant/message", changed)["error"]["code"],
+        "IDEMPOTENCY_CONFLICT"
+    );
+    assert_eq!(
+        api.call("projects/get", json!({"id":project}))["result"]["style"]["referenceAssetIds"],
+        json!([])
+    );
+
+    let next = api.call(
+        "assistant/message",
+        json!({"requestId":"revision-2","sessionId":id,"message":"What's next?"}),
+    )["result"]
+        .clone();
+    let next = api.wait_guide(next["id"].as_str().unwrap());
+    assert_eq!(next["status"], "READY", "{next}");
+    assert_eq!(next["referenceAssetIds"], json!([]));
+    assert_eq!(next["turnJobCount"], 0);
+    assert_eq!(
+        api.call("jobs/list", json!({"projectId":project}))["result"]["data"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+}
+#[test]
+fn chat_new_game_maps_explicit_revision_ids_without_repeating_creation() {
+    let mut api = Api::new("guide-new-game-reference");
+    let original_project = api.project();
+    let original = api.create(&original_project);
+    let original = api.wait(original["id"].as_str().unwrap());
+    assert_eq!(original["status"], "SUCCEEDED");
+    let reference = original["assetIds"][0].clone();
+    let input = json!({"requestId":"new-game-revision-1","projectId":original_project,"message":"Create a new game using this tower, and give it a red roof","allowGeneration":true,"referenceAssetIds":[reference]});
+    let accepted = api.call("assistant/message", input.clone())["result"].clone();
+    let id = accepted["id"].as_str().unwrap();
+    let done = api.wait_guide(id);
+    assert_eq!(done["status"], "READY", "{done}");
+    let new_project = done["projectId"].clone();
+    let copied = done["referenceAssetIds"][0].clone();
+    assert_ne!(new_project, original_project);
+    assert_ne!(copied, reference);
+    assert_eq!(done["messages"][0]["referenceAssetIds"], json!([copied]));
+    assert_eq!(done["turnJobCount"], 1);
+    let job = api.wait(done["generatedJobIds"][0].as_str().unwrap());
+    assert_eq!(job["status"], "SUCCEEDED", "{job}");
+    assert_eq!(job["projectId"], new_project);
+    assert_eq!(job["request"]["referenceAssetIds"], json!([copied]));
+    assert_eq!(job["referenceAssetIds"], json!([copied]));
+    assert_eq!(api.call("assistant/message", input)["result"]["id"], id);
+    assert_eq!(
+        api.call("projects/list", json!({}))["result"]["data"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        api.call("assets/list", json!({"projectId":original_project}))["result"]["data"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        api.call("jobs/list", json!({"projectId":new_project}))["result"]["data"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
 #[test]
 fn guide_disconnect_is_unknown_and_duplicate_message_does_not_restart_it() {
     let mut api = Api::new("guide-disconnect");

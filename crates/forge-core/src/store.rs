@@ -491,6 +491,7 @@ mod tests {
             thread_id: None,
             turn_id: None,
             allow_generation: true,
+            reference_asset_ids: vec![],
             generated_job_ids: vec![],
             turn_job_count: 0,
             error: None,

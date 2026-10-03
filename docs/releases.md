@@ -13,7 +13,7 @@ The app's update button opens the latest release page. Installation is explicit:
 
 The macOS package contains Apple Silicon binaries. Open the DMG and drag Asset Forge to Applications; the command-line executable is also inside `Asset Forge.app/Contents/MacOS`. The app is currently ad hoc signed rather than signed with an Apple Developer ID and notarized. A downloaded build may therefore require the macOS Open Anyway action in Privacy & Security.
 
-The Windows package targets Windows 10/11 x64 and installs per user to `%LOCALAPPDATA%\Programs\Asset Forge`. It creates Start menu and desktop shortcuts and an uninstall entry. Its uninstaller removes the bundled program files and shortcuts, preserves added files, and never deletes the Asset Forge workspace or Codex login. The installer is currently unsigned. The binaries require the Microsoft Visual C++ v14 x64 runtime; install the [official Microsoft runtime](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170) if it is not already present. The installer does not silently download dependencies.
+The Windows package targets Windows 10/11 x64 and installs per user to `%LOCALAPPDATA%\Programs\Asset Forge`. It creates Start menu and desktop shortcuts and an uninstall entry. Install and uninstall check that the studio and CLI are closed before changing the program files. Its uninstaller removes the bundled program files and shortcuts, preserves added files, and never deletes the Asset Forge workspace or Codex login. The installer is currently unsigned. The published Windows cross-build uses a static C runtime, so no separate Visual C++ runtime installation is required. The installer does not download dependencies.
 
 ## Local packaging
 
@@ -29,6 +29,14 @@ python3 scripts/package.py --no-build
 
 # Explicitly create just the app/portable ZIP when an installer is not needed.
 python3 scripts/package.py --no-build --portable-only
+```
+
+For a native Windows distribution build, set the static runtime flag in PowerShell before packaging:
+
+```powershell
+$env:RUSTFLAGS = "-C target-feature=+crt-static"
+python scripts/package.py
+python scripts/smoke_package.py
 ```
 
 Version numbers come from `[workspace.package]` in `Cargo.toml`. macOS package metadata and Windows installer metadata use that version. Native packaging checks the compiled CLI's reported version; Windows packages also check both EXEs are PE x64. Output paths are replaced instead of truncating a running executable.
@@ -87,7 +95,7 @@ For later patches, make the fix on `main`, carry it to the release branch with a
 
 ## Publish only verified artifacts
 
-Create a release notes file stating the exact source commit, target architectures, checks run, and any limits. Include SHA-256 checksums for the four distribution files. First create a draft, review its attached payload, then publish it. `--verify-tag` requires the tag to exist on GitHub; there is no deployment or build workflow behind this command.
+Create a release notes file stating the exact source commit, target architectures, checks run, and any limits. Describe the shipped interface accurately: Library and World provide previews and read-only catalogs; Forge chat creates and edits games, subjects, images and animations. Include SHA-256 checksums for the four distribution files. First create a draft, review its attached payload, then publish it. `--verify-tag` requires the tag to exist on GitHub; there is no deployment or build workflow behind this command.
 
 ```sh
 gh release create v0.1.0 --repo Gio-Bruno/game-asset-generator \

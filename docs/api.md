@@ -33,9 +33,12 @@ Match errors using `code`; messages are human-facing. Malformed request envelope
 | `projects/get` | `{id}` | `Project` | Safe |
 | `projects/style/update` | `{projectId, style: StyleGuide}` | `Project` | Replaces style; retry only the same intended replacement |
 | `characters/create` | `CreateCharacter` | `Character` | Creates a resource; unsafe to retry automatically |
+| `characters/get` | `{id}` | `Character` | Safe |
 | `characters/list` | Pagination + optional `projectId` | `Page<Character>` | Safe |
+| `characters/update` | `{id, name?, description?, kind?}` | `Character` | Applies only supplied fields; retry the same intended changes |
 | `characters/references/update` | `{id, referenceAssetIds}` | `Character` | Replaces references; retry only the same intended replacement |
 | `assets/import` | `{projectId, path, name, kind?}` | `Asset` | Copies a resource; unsafe to retry automatically |
+| `assets/get` | `{id}` | `Asset`, including assets outside the current list page | Safe |
 | `assets/list` | Pagination + optional `projectId` | `Page<Asset>` | Safe |
 | `assets/export` | `{id, path}` | `{assetId, path}` | Writes a new file; an existing target causes `EXPORT_ERROR` |
 | `animations/presets/list` | `{}` | Motion enum values | Safe |
@@ -74,7 +77,9 @@ The canonical schemas are the shared [Rust types](../crates/forge-core/src/contr
 
 `CreateProject`: `{name, style}`. Creation requires an empty style reference list; import images after creating the project. `Project`: `{id, name, style, createdAt}`. Times are Unix seconds.
 
-`CreateCharacter`: `{projectId, name, description, referenceAssetIds?}`. `Character`: `{id, projectId, name, description, referenceAssetIds}`. Saving a character alone establishes its text identity; pinning actual images gives stronger visual continuity.
+`CreateCharacter`: `{projectId, name, description, kind?, referenceAssetIds?}`. `Character`: `{id, projectId, name, description, kind, referenceAssetIds}`. `kind` is `CHARACTER`, `STRUCTURE` or `PROP` and defaults to `CHARACTER` for older records and omitted create inputs. The existing `characters/*` routes and generation `characterId` field also address structures and props, so all reusable identities share pinned references and immutable generation snapshots. Structure images use the static `PROP` output kind; their saved subject retains `STRUCTURE` identity.
+
+Saving a subject establishes its text identity; pinning actual images gives stronger visual continuity. `characters/update` changes only non-null supplied identity/category fields, rejects an empty update, and preserves the project and pinned references. The guide reads these categories in workspace context and can use `create_subject` and `update_subject` to save towers, buildings, items and characters without rendering an image. Its `create_game` tool creates and selects a separate project for an explicit new-game request; it leaves the previous game intact and copies only that message's attached images into the new game. `choose_style` changes the current project rather than creating a separate game.
 
 `Asset`: `{id, projectId, jobId, characterId, kind, name, path, width, height, hasAlpha, createdAt}`. `jobId` and `characterId` can be null. Assets are immutable, workspace-owned PNG files. `hasAlpha` reports actual translucent pixels rather than a format capability. Import accepts valid PNG, JPEG or WebP under 50 MB and at most 8192 pixels per side, then converts to PNG.
 
@@ -119,7 +124,7 @@ No job is automatically retried. Reopening the workspace turns unfinished jobs i
 
 Bounds: 2–16 frames, 1–8 columns (no more than frame count), cell dimensions 16–1024, 1–60 FPS, margin 0–128, spacing 0–64. The complete atlas must fit within 4096 × 4096. Frames are row-major; unused trailing cells are ignored. Rows are `ceil(frameCount / columns)`. Margin is the outer left/top offset; spacing is the gutter between cells. Imported sheets can contain extra unused pixels to the right or bottom.
 
-`CreateAnimation`: `{projectId, characterId, idempotencyKey, config, prompt?, referenceAssetIds?}`. Requires a saved character from the project. Generates one transparent atlas through the shared queue, with immutable style/character snapshots and their pinned references. Margin and spacing must be zero for generation. Width/height derive from the grid. The provider's source image is sliced into equal cells; each cell is resized proportionally to its target cell, preserving frame order and transparent padding. Empty frames fail with `EMPTY_ANIMATION_FRAME`, preserving the source atlas for manual setup. A valid opaque source is also preserved when transparency fails.
+`CreateAnimation`: `{projectId, characterId, idempotencyKey, config, prompt?, referenceAssetIds?}`. Requires a saved subject from the project. Generates one transparent atlas through the shared queue, with immutable style/subject snapshots and their pinned references. Margin and spacing must be zero for generation. Width/height derive from the grid. The provider's source image is sliced into equal cells; each cell is resized proportionally to its target cell, preserving frame order and transparent padding. Empty frames fail with `EMPTY_ANIMATION_FRAME`, preserving the source atlas for grid setup. A valid opaque source is also preserved when transparency fails.
 
 `Animation`: `{id, projectId, characterId, jobId, sourceAssetId, config, status, frames, previewPath, error, createdAt}`. Optional IDs and preview/error may be null. Each frame contains `{index, path, rect: {x,y,w,h}}`. Generated clip ID equals its job ID; `jobs/cancel` cancels its generation. Status and error follow the job, including `UNKNOWN` recovery. Generation retries replay one job; timing edits change the clip, leaving the original generation snapshot intact.
 
@@ -127,7 +132,7 @@ Bounds: 2–16 frames, 1–8 columns (no more than frame count), cell dimensions
 
 `animations/export` creates a ZIP containing `atlas.png`, `frames/frame-000.png` etc., `preview.gif`, and `animation.json`. JSON uses Aseprite-style frame rectangles, source sizes, durations in milliseconds, frame tags, FPS and loop metadata. Coordinates are in atlas pixels; default pivot is normalized `(0.5, 1.0)`. These are portable files rather than an engine-specific importer. PNGs carry full RGBA; GIF uses a limited palette and centisecond timing. The native preview uses PNG frames at the saved FPS.
 
-The GUI and guide choose cell defaults from the style: pixel 128, painterly 512, other styles 256. Six frames/three columns work well with landscape image generation. Run defaults to 12 FPS; Jump and Attack play once. Direct API callers receive the documented config defaults regardless of project style. `animate --request` and `call animations/create` wait for completion; `serve` returns immediately.
+Forge chooses cell defaults from the style: pixel 128, painterly 512, other styles 256. Six frames/three columns work well with landscape image generation. Run defaults to 12 FPS; Jump and Attack play once. Developers request changes in chat; the native interface displays the resulting library, world catalog and animation playback, and provides downloads. Direct API callers receive the documented config defaults regardless of project style. `animate --request` and `call animations/create` wait for completion; `serve` returns immediately.
 
 Motion continuity and character alignment are visual quality checks, not guaranteed by successful file extraction. Review playback before use in an engine.
 
@@ -143,21 +148,41 @@ Motion continuity and character alignment are visual quality checks, not guarant
   "sessionId": null,
   "projectId": null,
   "message": "Set up a cozy forest RPG and save its first scout character.",
-  "allowGeneration": false
+  "allowGeneration": false,
+  "referenceAssetIds": []
 }
 ```
 
-Required: `requestId`, `message`. The optional `sessionId` continues saved conversation. With no session, optional `projectId` scopes a new session; with neither, the guide can create a project. An existing session cannot be rebound to another project. `allowGeneration` defaults to false and permits at most one image job in this message when true. The guide must also interpret an explicit request to make an image; a permission flag alone is not an instruction to render. The server enforces the hard limit.
+Required: `requestId`, `message`. The optional `sessionId` continues saved conversation. With no session, optional `projectId` scopes a new session; with neither, the guide can create a project. A caller cannot rebind an existing session by supplying a different `projectId`. Forge's `create_game` tool can create a separate game and move the conversation to it when the user explicitly asks for a new game. `allowGeneration` defaults to false and permits at most one image job in this message when true. The guide must also interpret an explicit request to make an image; a permission flag alone is not an instruction to render. The server enforces the hard limit.
 
-`AssistantSession`: `{id, projectId, status, messages, threadId, turnId, allowGeneration, generatedJobIds, turnJobCount, error, createdAt}`. Project and diagnostic thread/turn IDs can be null. Messages contain `{role: "USER" | "ASSISTANT", text}`. Sessions keep up to 128 messages; the latest ten contextual messages plus current project data are supplied to each fresh ephemeral guide thread.
+`referenceAssetIds` defaults to an empty array. The native **Add to chat** action supplies image IDs here, including the source atlas for an animation. For example:
+
+```json
+{
+  "requestId": "revise-tower-001",
+  "sessionId": "opaque-session-id",
+  "projectId": "opaque-project-id",
+  "message": "Give this tower a red roof and preserve its silhouette.",
+  "allowGeneration": true,
+  "referenceAssetIds": ["opaque-tower-asset-id"]
+}
+```
+
+Attachments must exist in the session's current project. A foreign-project image returns `VALIDATION_ERROR`; an unknown asset returns `NOT_FOUND`. A message accepts at most eight supplied image IDs. The deduplicated combination of saved style references and message attachments must also fit within eight images before the message is accepted. At generation, the combined style, subject, message and tool-supplied reference IDs are deduplicated again and must total at most eight. Invalid counts or combined limits return `VALIDATION_ERROR` rather than silently dropping references.
+
+Forge receives the actual attached image pixels, metadata in `attachedReferences`, and matching clip metadata in `attachedAnimations`, including attachments outside the current list page. Its asset and animation generation tools automatically inherit the current message's attachments; additional explicit references merge without duplicate images. Adding an attachment alone does not pin it to the saved style or subject. It applies to this message only and is replaced by the next accepted message's list. Earlier conversation attachments are not automatically reused.
+
+`AssistantSession`: `{id, projectId, status, messages, threadId, turnId, allowGeneration, referenceAssetIds, generatedJobIds, turnJobCount, error, createdAt}`. Project and diagnostic thread/turn IDs can be null. `referenceAssetIds` contains the latest accepted message's deduplicated attachments, including after that turn finishes. Messages contain `{role: "USER" | "ASSISTANT", text, referenceAssetIds?}`; user messages preserve their attachment IDs and empty lists may be omitted. Older sessions and messages without these fields load with empty references. Sessions keep up to 128 messages; the latest ten contextual messages plus current project data are supplied to each fresh ephemeral guide thread.
 
 Statuses: `THINKING`, `READY`, `FAILED`, `UNKNOWN`. Cancellation ends as `FAILED` with `CANCELLED`; completed app changes and independently queued image jobs remain. Cancel image jobs separately with `jobs/cancel`. Reopening an interrupted workspace marks thinking sessions `UNKNOWN` and never repeats actions.
 
-The guide's app tools read current context, apply a preset, customize the current style’s name/direction/palette/camera/lighting, create a character, pin a same-project reference, queue an image or sprite animation, extract an existing sheet, and change clip timing. Static images and animation generation share the same one-job allowance. Arbitrary API methods, file export, external integrations and unrelated projects are outside its tools. Style customization applies only the supplied fields, preserves pinned references and the starter preset, and rejects an empty change. The composer and guide share the preset’s output dimensions; pixel sprites default to 256 × 256, painterly sprites to 1024 × 1024, and other sprites to 512 × 512. Explicit dimensions override defaults. The low-level `jobs/create` method retains its documented 1024 × 1024 defaults when dimensions are omitted; the GUI and guide pass their chosen preset dimensions explicitly.
+Forge owns the creation and editing actions in the native app. Its tools read current context, create a separate game, apply a preset, customize the current style’s name/direction/palette/camera/lighting, create or edit saved subjects, pin a same-project reference, queue an image or sprite animation, extract an existing sheet, and change clip timing. `create_subject` saves `CHARACTER`, `STRUCTURE` or `PROP` identities; `update_subject` edits an existing identity or category while preserving its references. The legacy `create_character` tool remains available for character identities. Static images and animation generation share the same one-job allowance. Arbitrary API methods, file export, external integrations and unrelated projects are outside its tools. Style customization applies only the supplied fields, preserves pinned references and the starter preset, and rejects an empty change. Forge chooses static output dimensions from the preset: pixel sprites default to 256 × 256, painterly sprites to 1024 × 1024, and other sprites to 512 × 512. Explicit dimensions override defaults. The low-level `jobs/create` method retains its documented 1024 × 1024 defaults when dimensions are omitted.
+
+The guide-only `create_game` tool leaves the previous game intact and copies only current-message attachments into the new project. Its result retains the `Project` fields and adds `attachedReferences` with the copied asset records and `referenceAssetIdMap`, an object mapping each old asset ID to its new copy's ID. Subsequent tools must use the new IDs. The session and current user message are updated to those IDs; generation automatically inherits the copied attachments. Historical style references and subjects remain in the original project. Replaying the same tool call returns the same project, copied IDs and mapping.
 
 Mutating tool calls have an atomic, payload-checked effect ledger keyed by session, turn and call ID. Repeated calls replay the stored result. A crash after claiming an effect yields `OUTCOME_UNKNOWN` instead of repeating it.
 
-Message `requestId` values remain in the workspace permanently. Same key and input replay the original **acceptance response**, which can still show `THINKING`; fetch `assistant/get` for current state. Changed input returns `IDEMPOTENCY_CONFLICT`. An in-flight ledger claim with no recorded acceptance yields `OUTCOME_UNKNOWN`; a separate message on a thinking session yields `ASSISTANT_BUSY`. Each message permits at most twelve tool calls. Notifications stream progress; they do not replace fetching current resources.
+Message `requestId` values remain in the workspace permanently. Same key and input replay the original **acceptance response**, which can still show `THINKING`; fetch `assistant/get` for current state. Changed input, including a changed attachment list, returns `IDEMPOTENCY_CONFLICT`. An omitted or empty `referenceAssetIds` list preserves the legacy request hash; nonempty lists are part of the payload, so preserve their order and contents on retries. An in-flight ledger claim with no recorded acceptance yields `OUTCOME_UNKNOWN`; a separate message on a thinking session yields `ASSISTANT_BUSY`. Each message permits at most twelve tool calls. Notifications stream progress; they do not replace fetching current resources.
 
 The one-shot CLI waits for the guide and any image started by its current message. The persistent `serve` transport returns immediately. CLI termination during a request still has an uncertain outcome; use the same request key to recover, then inspect saved state.
 

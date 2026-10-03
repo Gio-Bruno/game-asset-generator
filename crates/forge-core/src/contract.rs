@@ -42,7 +42,29 @@ pub struct Character {
     pub project_id: String,
     pub name: String,
     pub description: String,
+    /// Existing character records and clients remain characters when omitted.
+    #[serde(default)]
+    pub kind: SubjectKind,
     pub reference_asset_ids: Vec<String>,
+}
+
+/// Reusable identities share reference and generation behavior in the catalog.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum SubjectKind {
+    #[default]
+    Character,
+    Structure,
+    Prop,
+}
+impl SubjectKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Character => "Character",
+            Self::Structure => "Structure",
+            Self::Prop => "Prop",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,7 +74,21 @@ pub struct CreateCharacter {
     pub name: String,
     pub description: String,
     #[serde(default)]
+    pub kind: SubjectKind,
+    #[serde(default)]
     pub reference_asset_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateCharacter {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub kind: Option<SubjectKind>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
@@ -432,6 +468,9 @@ pub struct AssistantInput {
     pub message: String,
     #[serde(default)]
     pub allow_generation: bool,
+    /// Visual context for this message only. Empty input preserves legacy replay hashes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reference_asset_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -448,6 +487,8 @@ pub enum AssistantStatus {
 pub struct ChatMessage {
     pub role: String,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reference_asset_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -460,6 +501,8 @@ pub struct AssistantSession {
     pub thread_id: Option<String>,
     pub turn_id: Option<String>,
     pub allow_generation: bool,
+    #[serde(default)]
+    pub reference_asset_ids: Vec<String>,
     pub generated_job_ids: Vec<String>,
     #[serde(default)]
     pub turn_job_count: u32,

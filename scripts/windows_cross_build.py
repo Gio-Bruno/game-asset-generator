@@ -13,6 +13,7 @@ import os
 import platform
 import re
 import shutil
+import struct
 import subprocess
 import tarfile
 import urllib.request
@@ -149,7 +150,7 @@ def snapshot_source(gpui):
     if SOURCE.exists():
         shutil.rmtree(SOURCE)
     SOURCE.mkdir(parents=True)
-    included = ["Cargo.toml", "Cargo.lock", "crates", "assets"]
+    included = ["Cargo.toml", "Cargo.lock", "crates", "assets", "examples"]
     records = {}
     for name in included:
         original = ROOT / name
@@ -168,28 +169,64 @@ def snapshot_source(gpui):
     studio_manifest = SOURCE / "crates/forge-studio/Cargo.toml"
     studio_manifest.write_text(studio_manifest.read_text().replace('[package]\n', '[package]\nbuild = "windows_build.rs"\n', 1))
     build_script = SOURCE / "crates/forge-studio/windows_build.rs"
-    resource = gpui / "resources/windows/gpui.manifest.xml"
+    manifest_data = (gpui / "resources/windows/gpui.manifest.xml").read_bytes()
+    resource = TOOLS / "gpui-manifest.res"
+    # A standard Windows .res record avoids invoking Windows-only mt.exe.
+    # lld-link reads .res directly and embeds the original GPUI manifest.
+    null_header = struct.pack("<IIHHHHIHHII", 0, 32, 0xffff, 0, 0xffff, 0, 0, 0, 0, 0, 0)
+    header = struct.pack("<IIHHHHIHHII", len(manifest_data), 32, 0xffff, 24, 0xffff, 1, 0, 0x30, 0x409, 0, 0)
+    resource.write_bytes(null_header + header + manifest_data + b"\0" * (-len(manifest_data) % 4))
     build_script.write_text('fn main() {\n'
-                            '    println!("cargo:rustc-link-arg-bin=asset-forge-studio=/manifest:embed");\n'
-                            f'    println!("cargo:rustc-link-arg-bin=asset-forge-studio=/manifestinput:{resource}");\n'
+                            '    println!("cargo:rustc-link-arg-bin=asset-forge-studio=/manifest:no");\n'
+                            f'    println!("cargo:rustc-link-arg-bin=asset-forge-studio={resource}");\n'
                             '}\n')
     return records
+
+
+def committed_source(records, requested_commit):
+    if not requested_commit:
+        return None
+    commit = subprocess.check_output(["git", "rev-parse", requested_commit], cwd=ROOT, text=True).strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise SystemExit("Expected a resolved Git source commit.")
+    for relative, expected in records.items():
+        data = subprocess.check_output(["git", "show", f"{commit}:{relative}"], cwd=ROOT)
+        if sha(data) != expected:
+            raise SystemExit(f"Source snapshot differs from the requested commit: {relative}")
+    return commit
+
+
+def validate_lock():
+    def packages(text):
+        entries = {}
+        for block in text.split("[[package]]")[1:]:
+            name = re.search(r'^name = "([^"]+)"', block, re.M).group(1)
+            version = re.search(r'^version = "([^"]+)"', block, re.M).group(1)
+            if name == "gpui":
+                block = re.sub(r'^(source|checksum) = .*\n', '', block, flags=re.M)
+            entries[name, version] = block.strip()
+        return entries
+    if packages((ROOT / "Cargo.lock").read_text()) != packages((SOURCE / "Cargo.lock").read_text()):
+        raise SystemExit("Cross-build changed dependencies beyond the pinned GPUI path patch.")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prepare", action="store_true", help="Download/install only inside target/windows-tools.")
     parser.add_argument("--jobs", type=int, default=4)
+    parser.add_argument("--source-commit", help="Verify all copied inputs against this commit and emit a release manifest.")
     args = parser.parse_args()
     xwin, env = prepare_tools(args.prepare)
     gpui = prepare_gpui(env)
     records = snapshot_source(gpui)
+    source_commit = committed_source(records, args.source_commit)
     command = [xwin, "build", "--manifest-path", SOURCE / "Cargo.toml", "--workspace", "--release",
                "--target", TARGET, "--target-dir", OUTPUT, "--jobs", args.jobs,
                "--xwin-sdk-version", SDK_VERSION, "--xwin-version", "17",
                "--config", f'target.{TARGET}.rustflags=["-C", "target-feature=+crt-static"]']
     print("Building optimized Windows binaries from an isolated source snapshot.", flush=True)
     run(command, env)
+    validate_lock()
     binaries = OUTPUT / TARGET / "release"
     report = {"target": TARGET, "rustVersion": RUST_VERSION,
               "cargoXwinVersion": "0.23.1", "sdkVersion": SDK_VERSION,
@@ -200,6 +237,13 @@ def main():
                                for name in ["asset-forge-studio.exe", "asset-forge.exe"]},
               "shaderProvenance": json.loads((SHADERS / "provenance.json").read_text())}
     (OUTPUT / "build-provenance.json").write_text(json.dumps(report, indent=2) + "\n")
+    if source_commit:
+        version = re.search(r'^version = "([^"]+)"', (SOURCE / "Cargo.toml").read_text(), re.M).group(1)
+        report["sourceCommit"] = source_commit
+        (OUTPUT / "build-provenance.json").write_text(json.dumps(report, indent=2) + "\n")
+        release = {"schemaVersion": 1, "version": version, "sourceCommit": source_commit,
+                   "sha256": report["binarySha256"], "buildProvenance": "verified-local-cross-build"}
+        (OUTPUT / "windows-prebuilt-manifest.json").write_text(json.dumps(release, indent=2) + "\n")
     print(binaries)
 
 

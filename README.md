@@ -1,6 +1,6 @@
 # Asset Forge
 
-A local 2D game asset workshop for macOS and Windows, powered by your Codex subscription. Choose a visual preset or tell Forge, your AI art director, about the game. Forge can save the art direction, develop characters, and generate assets and sprite animations while keeping their identities and references consistent.
+A local 2D game asset workshop for macOS and Windows, powered by your Codex subscription. Tell Forge, your AI art director, about the game. Forge saves its art direction and reusable characters, structures and props, then generates assets and sprite animations with consistent identities and image references.
 
 The interface is native Rust/GPUI. The CLI, stdio API and desktop app share the same typed backend. No web server, API key, Node runtime or separate paid image API is required by Asset Forge.
 
@@ -13,7 +13,7 @@ Get the [latest release](https://github.com/Gio-Bruno/game-asset-generator/relea
 | macOS 12+, Apple Silicon | [Download DMG](https://github.com/Gio-Bruno/game-asset-generator/releases/latest/download/Asset-Forge-macOS-arm64.dmg) | [Download ZIP](https://github.com/Gio-Bruno/game-asset-generator/releases/latest/download/Asset-Forge-macOS.zip) |
 | Windows 10/11, x64 | [Download Setup.exe](https://github.com/Gio-Bruno/game-asset-generator/releases/latest/download/Asset-Forge-Windows-x64-Setup.exe) | [Download ZIP](https://github.com/Gio-Bruno/game-asset-generator/releases/latest/download/Asset-Forge-Windows.zip) |
 
-On macOS, open the DMG and drag **Asset Forge** into **Applications**. On Windows, run Setup.exe; it installs for your user and adds a Start menu shortcut. Windows requires the [Microsoft Visual C++ v14 x64 runtime](https://aka.ms/vc14/vc_redist.x64.exe) if it is not already installed. These first release packages do not have public distribution signatures; the Mac app uses a local ad hoc signature and is not notarized.
+On macOS, open the DMG and drag **Asset Forge** into **Applications**. On Windows, run Setup.exe; it installs for your user and adds a Start menu shortcut. The published Windows cross-build links its C runtime statically and needs no separate Visual C++ runtime installation. These first release packages do not have public distribution signatures; the Mac app uses a local ad hoc signature and is not notarized.
 
 Choose **Update** in the app to open the latest release, then download its installer. Close Asset Forge before installing an update. Your projects and generated assets are stored separately from the application.
 
@@ -21,12 +21,12 @@ On macOS, open `dist/Asset Forge.app`. The portable CLI is `dist/asset-forge`. O
 
 1. Install the [Codex CLI](https://learn.chatgpt.com/docs/cli) if it is not already available. Asset Forge was verified with Codex CLI **0.160.0**.
 2. Open Asset Forge. It detects the existing Codex login. Otherwise choose **Connect Codex** and complete sign-in in your browser; Codex stores and refreshes the credentials.
-3. Choose one of six visual directions in **Art direction**, or use a game suggestion in the Forge panel. The guide can set up the style and cast for you.
-4. Tell Forge what you want to create: “Make Mira's first idle pose,” “Give her a running pose,” or “Create a matching woodland scene.” It acts in the current project and queues an image when you request one. You can also ask it to customize colors, lighting and perspective while retaining your saved references.
-5. For direct control, use **Canvas**: choose a type and character, enter one brief, and generate. Dimensions and backgrounds have sensible defaults; **Output settings** exposes overrides.
-6. Choose a result and pin it with **Style ref** or **Character ref**. Future generations attach those actual pixels. **+ Image reference** imports pixels directly into the next manual generation; reference chips remove them with one click. Library **+ Reference** buttons also reuse existing assets.
-7. Use **Animate** for Idle, Walk, Run, Jump, Attack or custom motion. Generate a transparent clip from a saved character, preview or step through frames, adjust timing, then **Export clip**. To use existing art, import a sprite sheet and extract frames; the grid fits the current preset automatically. Clip settings expose rectangular cells, margin and spacing. Image references can be added directly in Canvas or Animate.
-8. Export a PNG, or import your existing art with the native file picker. **Cast** and **Customize details** provide manual identity and style editing.
+3. Choose **New game** to start a fresh chat, then describe your game: “Set up a woodland tower defense with an arrow tower, a cannon tower and a scout.” Forge chooses sensible style defaults and saves the named characters, structures and props. A request for a new game in an existing chat creates a separate project.
+4. Browse **World** to review the saved art direction and the **Characters**, **Structures** and **Props** catalog. These are read-only summaries; ask Forge to change names, designs, colors, lighting or perspective.
+5. Ask Forge to create an image: “Generate the arrow tower,” “Make Mira's first idle pose,” or “Create a matching woodland scene.” The guide uses the saved style and subject identity and queues an image only when requested. Setup and advice do not require generation.
+6. Browse **Library** to see images and animations, select a preview, and export the result. The library provides read-only image and animation lists rather than creation forms.
+7. Choose **Add to chat** on an asset, or **+ Image** in Forge to import a reference, then ask for a revision: “Keep this tower's silhouette and make its roof teal.” Forge receives the actual attached pixels; the generation also inherits them. Attachments apply to that message and can be removed before sending.
+8. Ask Forge for Idle, Walk, Run, Jump, Attack or custom motion. It can generate a sprite animation, extract frames from an attached sheet, pin an image as a style or subject reference, and change playback timing. Preview, pause or step through the resulting clip in Library, then export its portable ZIP.
 
 Presets include Woodland ink, Pixel adventure, Bold & playful, Sketchbook, Painterly fantasy, and Tiny isometric. The [design notes](docs/design.md) document the inspected Mobbin references.
 
@@ -147,9 +147,11 @@ cargo test --locked -p forge-core -p forge-cli
 cargo clippy --locked --workspace --all-targets -- -D warnings
 ```
 
-The subprocess integration tests use a deterministic fake Codex server and do not consume subscription capacity. They cover real PNG decoding, image dimensions, duplicate requests, provider failure, missing/invalid images, disconnection and cancellation. Guide tests verify action replay, project isolation, generation permissions, the one-image limit, custom palette changes with preserved references, saved preset dimensions, and uncertain disconnects. Store tests cover snapshots, interrupted-process recovery, workspace leases, cross-project references and validation.
+The subprocess integration tests use a deterministic fake Codex server and do not consume subscription capacity. They cover real PNG decoding, image dimensions, duplicate requests, provider failure, missing/invalid images, disconnection and cancellation. Guide tests verify action replay, project isolation, generation permissions, the one-image limit, custom palette changes with preserved references, saved preset dimensions, uncertain disconnects, subject classification and new-game creation. Chat reference tests check project scope, combined image limits and legacy messages. Store tests cover snapshots, interrupted-process recovery, workspace leases, cross-project references and validation.
 
-The macOS app has been built and exercised with native reference import/pinning, guide-created cast, sprite-sheet setup, playback, frame stepping and PNG/animation export. All 21 local tests pass. Live Codex app-server generated the included [Mira sprite](examples/generated/mira-idle.png), a matching [woodland scene](examples/generated/woodland-scene.png), a [guided sprite](examples/generated/mira-guided.png), and a six-frame [walk atlas](examples/generated/mira-walk-atlas.png) with [GIF preview](examples/generated/mira-walk.gif) and [portable ZIP](examples/generated/mira-walk.zip). GitHub Actions built the Windows release package, passed the packaged CLI check and opened a responsive native window. Full interactive Windows flows have not been manually exercised.
+The expanded suite passes 28 tests: 16 core tests and 12 Unix subprocess integration tests. The previous macOS interface was exercised with native import/pinning, guide-created identities, sprite-sheet setup, playback, frame stepping and exports. Native verification of the simplified Library/World interface is pending; previous UI checks do not verify this redesign.
+
+Live Codex app-server generated the included [Mira sprite](examples/generated/mira-idle.png), a matching [woodland scene](examples/generated/woodland-scene.png), a [guided sprite](examples/generated/mira-guided.png), and a six-frame [walk atlas](examples/generated/mira-walk-atlas.png) with [GIF preview](examples/generated/mira-walk.gif) and [portable ZIP](examples/generated/mira-walk.zip). The historical Windows build passed a packaged CLI check and opened a responsive native window. Full interactive Windows flows have not been manually exercised. GitHub Actions is now disabled and its workflow is removed; subsequent builds use the manual release procedure.
 
 See [current verification](docs/verification.md) for the requirement-by-requirement evidence and the remaining platform checks.
 
