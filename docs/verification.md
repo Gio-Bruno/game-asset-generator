@@ -1,5 +1,17 @@
 # Current verification
 
+## Unreleased separate production assets
+
+Verified locally on 2026-10-03. The app can now render several requested subjects as individual production images instead of substituting a concept board. Published v0.1.0 installers are unchanged.
+
+- All 37 tests pass on macOS: 22 core and 15 Unix subprocess integration tests. Formatting, strict workspace Clippy, optimized builds and the local Mac bundle's strict signature verification pass.
+- Batch checks cover independent named PNGs and exports, correct subject associations, atomic rollback for invalid items, replay across restart, generation allowance enforcement, cancellation of one item without cancelling its peers, and one-shot CLI completion after a partial failure.
+- Concept board reclassification preserves the original pixels and clears the incorrect single-character association. Production prompts isolate one subject and prohibit copying a whole reference board. Character, structure, prop and scene identities are supported; sprite sheets retain one identity across frames.
+- Each subject's first successful matching individual image becomes its initial pinned visual reference. Existing references and identities edited during rendering are preserved.
+- Native macOS Forge used Add to chat on Ashen Bastion's concept board, then queued five separate named images in the existing game. The sidebar displayed each pending item and its rendering/queued state. All five real Codex jobs succeeded, each producing one independent 512 × 512 PNG: Ironbolt Tower, Ember Reliquary, Warding Obelisk, Gravebound Raider and Cinder Fiend. Visual review shows one complete named subject per file, without labels or other subjects; all five have actual transparent pixels and their own pinned identity reference. These are individual renders using the original board as reference, rather than pixel-exact crops.
+- The final native Library lists all five individual assets plus the preserved concept reference. Structure and character previews display their own names and categories. Download PNG exported Warding Obelisk byte-for-byte; Add to chat attached only that structure and its removable reference chip. The app remains open on Gravebound Raider in Ashen Bastion. The workspace's two active games were preserved.
+- Native Windows interaction with this iteration and new animation generation remain unverified. The backend retains sprite extraction, playback timing and per-clip exports.
+
 ## Unreleased game hierarchy and creative questions
 
 Verified locally on 2026-10-03. This iteration is packaged in `dist/Asset Forge.app` for testing; the published `v0.1.0` installers and tag retain their original source.

@@ -80,6 +80,11 @@ async fn run(cli: Cli) -> Result<()> {
                     "{}",
                     json!({"result":service.dispatch("animations/get",json!({"id":id})).await?})
                 );
+            } else if method == "jobs/batch/create" {
+                let ids: Vec<String> =
+                    serde_json::from_value(value["jobIds"].clone()).map_err(ApiError::storage)?;
+                let jobs = wait_jobs(&service, &ids).await?;
+                println!("{}", json!({"result":{"batch":value,"jobs":jobs}}));
             } else if method == "jobs/create" {
                 let job: Job = serde_json::from_value(value).map_err(ApiError::storage)?;
                 println!("{}", json!({"result":wait_job(&service,&job.id).await?}));
@@ -184,14 +189,37 @@ async fn wait_guide(service: &Service, id: &str) -> Result<Value> {
             if let Some(error) = session.error {
                 return Err(error);
             }
-            if session.turn_job_count > 0
-                && let Some(job) = session.generated_job_ids.last()
-            {
-                wait_job(service, job).await?;
+            if session.turn_job_count > 0 {
+                let start = session
+                    .generated_job_ids
+                    .len()
+                    .saturating_sub(session.turn_job_count as usize);
+                let jobs = wait_jobs(service, &session.generated_job_ids[start..]).await?;
+                if let Some(job) = jobs.into_iter().find(|j| j.status != JobStatus::Succeeded) {
+                    return Err(job.error.unwrap_or_else(|| {
+                        ApiError::new(
+                            "GENERATION_FAILED",
+                            "An asset in the batch did not succeed.",
+                        )
+                    }));
+                }
             }
             return Ok(value);
         }
         tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+async fn wait_jobs(service: &Service, ids: &[String]) -> Result<Vec<Job>> {
+    loop {
+        let mut jobs = Vec::with_capacity(ids.len());
+        for id in ids {
+            let job = service.dispatch("jobs/get", json!({"id":id})).await?;
+            jobs.push(serde_json::from_value::<Job>(job).map_err(ApiError::storage)?);
+        }
+        if jobs.iter().all(|j| j.status.is_terminal()) {
+            return Ok(jobs);
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
 }
 #[derive(Deserialize)]

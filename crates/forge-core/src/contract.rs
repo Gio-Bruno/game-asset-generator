@@ -42,6 +42,14 @@ pub struct RenameInput {
     pub name: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateAsset {
+    pub id: String,
+    pub name: Option<String>,
+    pub kind: Option<AssetKind>,
+}
+
 /// Deletion hides records and keeps their files available for restoration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -73,6 +81,7 @@ pub enum SubjectKind {
     Character,
     Structure,
     Prop,
+    Scene,
 }
 impl SubjectKind {
     pub fn label(self) -> &'static str {
@@ -80,6 +89,7 @@ impl SubjectKind {
             Self::Character => "Character",
             Self::Structure => "Structure",
             Self::Prop => "Prop",
+            Self::Scene => "Scene",
         }
     }
 }
@@ -116,6 +126,38 @@ pub enum AssetKind {
     Scene,
     Prop,
     SpriteSheet,
+    ConceptSheet,
+}
+
+/// A batch renders one independent file for every saved subject.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GenerateBatchInput {
+    pub project_id: String,
+    pub idempotency_key: String,
+    pub items: Vec<GenerateBatchItem>,
+    #[serde(default)]
+    pub reference_asset_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GenerateBatchItem {
+    pub character_id: String,
+    pub prompt: String,
+    #[serde(default)]
+    pub width: Option<u32>,
+    #[serde(default)]
+    pub height: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerationBatch {
+    pub id: String,
+    pub project_id: String,
+    pub job_ids: Vec<String>,
+    pub created_at: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -146,6 +188,11 @@ fn default_size() -> u32 {
 
 impl GenerateInput {
     pub fn validate(&self) -> Result<()> {
+        if self.kind == AssetKind::ConceptSheet && self.character_id.is_some() {
+            return Err(ApiError::validation(
+                "A concept sheet is a project reference, not a single subject's asset.",
+            ));
+        }
         nonempty("prompt", &self.prompt, 8000)?;
         nonempty("idempotencyKey", &self.idempotency_key, 128)?;
         for dimension in [self.width, self.height] {

@@ -336,14 +336,84 @@ impl Store {
     }
 
     pub fn claim_job(&self, request: GenerateInput) -> Result<(Job, bool)> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(ApiError::storage)?;
+        let result = Self::claim_job_in(&tx, request)?;
+        tx.commit().map_err(ApiError::storage)?;
+        Ok(result)
+    }
+
+    pub fn claim_batch(
+        &self,
+        input: &GenerateBatchInput,
+        requests: Vec<GenerateInput>,
+    ) -> Result<(GenerationBatch, Vec<Job>)> {
+        let key = format!("asset-batch:{}:{}", input.project_id, input.idempotency_key);
         let hash = format!(
             "{:x}",
-            Sha256::digest(serde_json::to_vec(&request).map_err(ApiError::storage)?)
+            Sha256::digest(serde_json::to_vec(input).map_err(ApiError::storage)?)
         );
         let mut conn = self.conn.lock().unwrap();
         let tx = conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(ApiError::storage)?;
+        let existing: Option<(String, String)> = tx
+            .query_row(
+                "SELECT request_hash,response FROM effects WHERE intent_key=?1",
+                [&key],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(ApiError::storage)?;
+        if let Some((previous_hash, data)) = existing {
+            if previous_hash != hash {
+                return Err(ApiError::new(
+                    "IDEMPOTENCY_CONFLICT",
+                    "This batch key was already used with different items.",
+                ));
+            }
+            return Ok((
+                serde_json::from_str(&data).map_err(ApiError::storage)?,
+                vec![],
+            ));
+        }
+        let mut jobs = Vec::with_capacity(requests.len());
+        let mut new_jobs = vec![];
+        for request in requests {
+            let (job, is_new) = Self::claim_job_in(&tx, request)?;
+            if is_new {
+                new_jobs.push(job.clone());
+            }
+            jobs.push(job);
+        }
+        let batch = GenerationBatch {
+            id: id(),
+            project_id: input.project_id.clone(),
+            job_ids: jobs.iter().map(|j| j.id.clone()).collect(),
+            created_at: now(),
+        };
+        let data = serde_json::to_string(&batch).map_err(ApiError::storage)?;
+        tx.execute(
+            "INSERT INTO effects(intent_key,request_hash,response) VALUES(?1,?2,?3)",
+            params![key, hash, data],
+        )
+        .map_err(ApiError::storage)?;
+        tx.execute(
+            "INSERT INTO entities(id,kind,project_id,data) VALUES(?1,'batch',?2,?3)",
+            params![batch.id, batch.project_id, data],
+        )
+        .map_err(ApiError::storage)?;
+        tx.commit().map_err(ApiError::storage)?;
+        Ok((batch, new_jobs))
+    }
+
+    fn claim_job_in(tx: &rusqlite::Transaction<'_>, request: GenerateInput) -> Result<(Job, bool)> {
+        let hash = format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&request).map_err(ApiError::storage)?)
+        );
         let existing: Option<(String, String)> = tx
             .query_row(
                 "SELECT request_hash,data FROM jobs WHERE project_id=?1 AND intent_key=?2",
@@ -446,7 +516,6 @@ impl Store {
             ],
         )
         .map_err(ApiError::storage)?;
-        tx.commit().map_err(ApiError::storage)?;
         Ok((job, true))
     }
 
@@ -463,6 +532,45 @@ impl Store {
             )
             .map_err(ApiError::storage)?;
         Ok(())
+    }
+    pub fn pin_initial_asset(&self, job: &Job, asset: &Asset) -> Result<()> {
+        let Some(snapshot) = &job.character_snapshot else {
+            return Ok(());
+        };
+        if !matches!(
+            (snapshot.kind, asset.kind),
+            (SubjectKind::Character, AssetKind::Character)
+                | (SubjectKind::Structure | SubjectKind::Prop, AssetKind::Prop)
+                | (SubjectKind::Scene, AssetKind::Scene)
+        ) {
+            return Ok(());
+        }
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction().map_err(ApiError::storage)?;
+        let data: Option<String> = tx.query_row(
+            "SELECT data FROM entities e WHERE id=?1 AND kind='character' AND project_id=?2 AND NOT EXISTS (SELECT 1 FROM deleted_entities d WHERE d.id=e.id OR d.id=e.project_id)",
+            params![snapshot.id,asset.project_id], |r|r.get(0),
+        ).optional().map_err(ApiError::storage)?;
+        if let Some(data) = data {
+            let mut subject: Character = serde_json::from_str(&data).map_err(ApiError::storage)?;
+            // Do not replace existing references or pin a render of an identity edited while it ran.
+            if subject.reference_asset_ids.is_empty()
+                && subject.name == snapshot.name
+                && subject.description == snapshot.description
+                && subject.kind == snapshot.kind
+            {
+                subject.reference_asset_ids.push(asset.id.clone());
+                tx.execute(
+                    "UPDATE entities SET data=?2 WHERE id=?1",
+                    params![
+                        subject.id,
+                        serde_json::to_string(&subject).map_err(ApiError::storage)?
+                    ],
+                )
+                .map_err(ApiError::storage)?;
+            }
+        }
+        tx.commit().map_err(ApiError::storage)
     }
     pub fn job(&self, key: &str) -> Result<Job> {
         let data: Option<String> = self

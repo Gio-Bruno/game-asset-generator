@@ -198,10 +198,21 @@ impl Service {
                     encode(project)
                 }
                 "assets/update" => {
-                    let p: RenameInput = decode(params)?;
-                    nonempty("name", &p.name, 120)?;
+                    let p: UpdateAsset = decode(params)?;
+                    if p.name.is_none() && p.kind.is_none() {
+                        return Err(ApiError::validation("Specify a name or asset kind."));
+                    }
                     let mut asset: Asset = self.store.get("asset", &p.id)?;
-                    asset.name = p.name.trim().into();
+                    if let Some(name) = p.name {
+                        nonempty("name", &name, 120)?;
+                        asset.name = name.trim().into();
+                    }
+                    if let Some(kind) = p.kind {
+                        asset.kind = kind;
+                        if kind == AssetKind::ConceptSheet {
+                            asset.character_id = None;
+                        }
+                    }
                     self.store
                         .put("asset", &asset.id, Some(&asset.project_id), &asset)?;
                     encode(asset)
@@ -394,15 +405,17 @@ impl Service {
                     let (job, is_new) = self.store.claim_job(input)?;
                     self.ensure_animation(&job)?;
                     if is_new {
-                        let (tx, rx) = watch::channel(false);
-                        self.cancellations.lock().await.insert(job.id.clone(), tx);
-                        let service = self.clone();
-                        let work = job.clone();
-                        tokio::spawn(async move {
-                            service.run_job(work, rx).await;
-                        });
+                        self.launch_job(job.clone()).await;
                     }
                     encode(job)
+                }
+                "jobs/batch/create" => {
+                    let input: GenerateBatchInput = decode(params)?;
+                    encode(self.generate_batch(input).await?)
+                }
+                "jobs/batch/get" => {
+                    let p: IdInput = decode(params)?;
+                    encode(self.store.get::<GenerationBatch>("batch", &p.id)?)
                 }
                 "jobs/get" => {
                     let p: IdInput = decode(params)?;
@@ -444,6 +457,15 @@ impl Service {
                 )),
             }
         })
+    }
+
+    pub(crate) async fn launch_job(&self, job: Job) {
+        let (tx, rx) = watch::channel(false);
+        self.cancellations.lock().await.insert(job.id.clone(), tx);
+        let service = self.clone();
+        tokio::spawn(async move {
+            service.run_job(job, rx).await;
+        });
     }
 
     async fn run_job(&self, mut job: Job, mut cancelled: watch::Receiver<bool>) {
@@ -668,11 +690,14 @@ impl Service {
                     "Codex did not return image pixels.",
                 ));
             };
-            let name = job
-                .character_snapshot
-                .as_ref()
-                .map(|c| c.name.as_str())
-                .unwrap_or("Game asset");
+            let name = if job.request.kind == AssetKind::ConceptSheet {
+                "Concept sheet"
+            } else {
+                job.character_snapshot
+                    .as_ref()
+                    .map(|c| c.name.as_str())
+                    .unwrap_or("Game asset")
+            };
             let pixel_art = job
                 .style_snapshot
                 .description
@@ -731,6 +756,8 @@ impl Service {
             }
             if job.request.animation.is_some() {
                 self.finish_animation(job, &asset)?;
+            } else {
+                self.store.pin_initial_asset(job, &asset)?;
             }
         }
         job.status = JobStatus::Succeeded;

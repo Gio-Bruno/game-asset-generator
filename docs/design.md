@@ -23,7 +23,9 @@ The guide acts through typed app tools for project creation, style changes, save
 
 The developer can ask for a sprite, structure, prop or matching scene without filling in technical settings. Static subjects default to transparent square PNGs; scenes default to a 1536 × 1024 opaque PNG. Pixel art uses smaller sprite defaults and Painterly fantasy uses larger ones. Starter dimensions survive style customization; explicit chat instructions can override output settings through the same backend contract.
 
-The guide may create one image job per permitted user message. Setup suggestions permit no generation. It never automatically repeats uncertain actions. Chat persists locally with streaming text and visible action receipts; rendering continues independently after Forge reports the queued job.
+The guide may queue one generation request per permitted user message: one image or, for a request involving several assets, one batch of 2–12 separate subject images. Every character, structure, prop and environment has its own named file and saved identity. A concept sheet is generated only when explicitly requested and displayed as a reference; it never substitutes for usable production assets. Sprite sheet cells belong to one animated identity. The sidebar lists pending subjects individually with rendering/queued state and cancellation. Completed images can be viewed, exported and added to chat independently. The first valid isolated image becomes its subject's initial visual reference, preserving existing pins.
+
+Setup suggestions permit no generation. The batch receipt and jobs commit atomically, and replay never queues them again. Chat persists locally with streaming text and visible action receipts; rendering continues independently after Forge reports the queued jobs. Each failed job remains inspectable while the other items continue.
 
 ## Image revisions
 

@@ -65,6 +65,7 @@ pub struct Studio {
     account: Option<AccountStatus>,
     login: Option<Login>,
     job: Option<Job>,
+    active_jobs: Vec<Job>,
     status: String,
     is_error: bool,
     guide: Option<AssistantSession>,
@@ -127,6 +128,7 @@ impl Studio {
             account: None,
             login: None,
             job: None,
+            active_jobs: vec![],
             status: "Tell Forge about your game to begin.".into(),
             is_error: false,
             guide: None,
@@ -189,7 +191,7 @@ impl Studio {
                 .is_some_and(|g| g.status == AssistantStatus::Thinking)
     }
     fn rendering(&self) -> bool {
-        self.job.as_ref().is_some_and(|j| !j.status.is_terminal())
+        !self.active_jobs.is_empty() || self.job.as_ref().is_some_and(|j| !j.status.is_terminal())
     }
     fn refresh(&self) {
         if let Some(id) = self.project_id() {
@@ -208,7 +210,7 @@ impl Studio {
             if let Some(clip) = &self.animation_id {
                 self.send("animations/get", json!({"id":clip}));
             }
-            self.send("jobs/list", json!({"projectId":id,"pageSize":1}));
+            self.send("jobs/list", json!({"projectId":id,"pageSize":100}));
         }
     }
     fn reset_library(&mut self) {
@@ -223,6 +225,7 @@ impl Studio {
         self.animations_loaded = false;
         self.ready_jobs.clear();
         self.job = None;
+        self.active_jobs.clear();
         self.asset_page = 1;
         self.asset_total = 0;
         self.animation_page = 1;
@@ -726,6 +729,10 @@ impl Studio {
                     if Some(job.project_id.as_str()) != self.project_id().as_deref() {
                         return;
                     }
+                    self.active_jobs.retain(|j| j.id != job.id);
+                    if !job.status.is_terminal() {
+                        self.active_jobs.push(job.clone());
+                    }
                     if let Some(id) = job.asset_ids.first()
                         && self.ready_jobs.insert(job.id.clone())
                     {
@@ -760,7 +767,17 @@ impl Studio {
             }
             "jobs/list" => {
                 if let Ok(page) = serde_json::from_value::<Page<Job>>(data) {
-                    self.job = page.data.into_iter().next();
+                    self.active_jobs = page
+                        .data
+                        .iter()
+                        .filter(|j| !j.status.is_terminal())
+                        .cloned()
+                        .collect();
+                    self.job = self
+                        .active_jobs
+                        .first()
+                        .cloned()
+                        .or_else(|| page.data.into_iter().next());
                 }
             }
             "assistant/message" | "assistant/get" => {
@@ -1023,12 +1040,15 @@ impl Studio {
         .detach();
     }
     fn asset_name(&self, asset: &Asset) -> String {
+        if asset.kind == AssetKind::ConceptSheet {
+            return format!("{} · Reference", asset.name);
+        }
         if let Some(subject) = asset
             .character_id
             .as_ref()
             .and_then(|id| self.subjects.iter().find(|s| &s.id == id))
         {
-            format!("{} · {}", subject.name, subject.kind.label())
+            format!("{} · {}", asset.name, subject.kind.label())
         } else {
             asset.name.clone()
         }
@@ -1140,6 +1160,48 @@ impl Studio {
             .flex()
             .flex_col()
             .gap_1();
+        for job in &self.active_jobs {
+            let id = job.id.clone();
+            assets = assets.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .p_2()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div().text_xs().truncate().child(
+                                    job.character_snapshot
+                                        .as_ref()
+                                        .map(|s| s.name.clone())
+                                        .unwrap_or_else(|| "New asset".into()),
+                                ),
+                            )
+                            .child(div().text_size(px(10.)).text_color(rgb(MUTED)).child(
+                                if job.status == JobStatus::Running {
+                                    "Rendering…"
+                                } else {
+                                    "Queued"
+                                },
+                            )),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("cancel-{id}")))
+                            .label("×")
+                            .tooltip("Cancel this asset")
+                            .xsmall()
+                            .ghost()
+                            .on_click(cx.listener(move |this, _, _, _| {
+                                this.send("jobs/cancel", json!({"id":id}))
+                            })),
+                    ),
+            );
+        }
         if self.filter != Filter::Animations {
             for asset in &self.assets {
                 let selected_id = asset.id.clone();
@@ -1617,6 +1679,7 @@ impl Studio {
                 (SubjectKind::Character, "CHARACTERS"),
                 (SubjectKind::Structure, "STRUCTURES"),
                 (SubjectKind::Prop, "PROPS"),
+                (SubjectKind::Scene, "SCENES"),
             ] {
                 let subjects: Vec<_> = self.subjects.iter().filter(|s| s.kind == kind).collect();
                 if subjects.is_empty() {
@@ -1945,7 +2008,7 @@ impl Studio {
                 .when(self.guide_busy()||self.rendering(),|d|d.child(Button::new("stop").label("Stop").small().ghost().w_full()
                     .on_click(cx.listener(|this,_,_,_|{
                         if let Some(guide)=&this.guide && guide.status==AssistantStatus::Thinking {this.send("assistant/cancel",json!({"id":guide.id}));}
-                        if let Some(job)=&this.job && !job.status.is_terminal() {this.send("jobs/cancel",json!({"id":job.id}));}
+                        for job in &this.active_jobs {this.send("jobs/cancel",json!({"id":job.id}));}
                     }))))
                 .child(div().text_size(px(10.)).text_color(rgb(MUTED)).child(if connected{"Add an asset to chat to revise it. Forge keeps your saved style and references."}else{"Connect Codex above to begin."})))
     }

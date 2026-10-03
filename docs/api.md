@@ -42,7 +42,7 @@ Match errors using `code`; messages are human-facing. Malformed request envelope
 | `characters/references/update` | `{id, referenceAssetIds}` | `Character` | Replaces references; retry only the same intended replacement |
 | `assets/import` | `{projectId, path, name, kind?}` | `Asset` | Copies a resource; unsafe to retry automatically |
 | `assets/get` | `{id}` | `Asset`, including assets outside the current list page | Safe |
-| `assets/update` | `{id, name}` | Renamed `Asset` | Reapply same name |
+| `assets/update` | `{id, name?, kind?}` | Updated `Asset`; `CONCEPT_SHEET` clears single-subject association | Reapply same fields |
 | `assets/delete` | `{id}` | `Deletion`; also hides dependent clips and unpins references | Repeated deletion returns `NOT_FOUND` |
 | `assets/restore` | `{id}` | Restored `Asset` and dependent clips; references stay unpinned | Safe |
 | `assets/list` | Pagination + optional `projectId` | `Page<Asset>` | Safe |
@@ -60,10 +60,22 @@ Match errors using `code`; messages are human-facing. Malformed request envelope
 | `jobs/get` | `{id}` | `Job` | Safe |
 | `jobs/list` | Pagination + optional `projectId` | `Page<Job>` | Safe |
 | `jobs/cancel` | `{id}` | Current `Job`; terminal state arrives later | Safe |
+| `jobs/batch/create` | `GenerateBatchInput` | `GenerationBatch` with separate job IDs | Idempotent per project and batch key |
+| `jobs/batch/get` | `{id}` | `GenerationBatch` receipt | Safe |
 
 Pagination: `page` defaults to 1; `pageSize` defaults to 50 and accepts 1–100. Lists use newest-first order. Deletion is recoverable: records and files remain local but are hidden from normal reads and lists, including global lists of a deleted game’s contents. Deletion returns `{id, kind, projectId, name}`. A running guide or image job in the game returns `PROJECT_BUSY` before any deletion. Restore the game before restoring individual assets (`PROJECT_DELETED`). Paths for import and export belong to the local machine running the API. Export fails instead of overwriting an existing file.
 
 ## Resource types
+
+### Separate production assets
+
+`GenerateBatchInput`: `{projectId, idempotencyKey, items: [{characterId, prompt, width?, height?}], referenceAssetIds?}`. A batch has 2–12 distinct saved subjects in the same game. The backend derives each output kind from that subject: characters use `CHARACTER`, structures/props use `PROP`, environments use `SCENE`. Style defaults choose omitted dimensions. Characters, structures and props request real transparency; scenes request a complete environment. All jobs share the saved style and supplied references but have their own subject snapshots, asset IDs, names, PNG files and cancellation state.
+
+`GenerationBatch`: `{id, projectId, jobIds, createdAt}`. The receipt, replay hash and jobs commit atomically before rendering starts. Invalid subjects or references leave no partial batch. Reusing the key with different items, order, dimensions or references returns `IDEMPOTENCY_CONFLICT`; exact replay returns the same job IDs without starting workers again, including after restart. Jobs render serially. Read their status with `jobs/get`; a failed item does not prevent remaining items from completing. Uncertain interrupted jobs are not automatically retried.
+
+The one-shot `call jobs/batch/create` waits for every job and returns `{batch, jobs}`; inspect each job's status for partial failures. The persistent stdio method returns the receipt immediately. The first successful, isolated image is pinned to its matching subject if that subject has no references and its text identity has not changed during rendering. Existing pins are preserved. This gives future revisions and animations the subject's own pixels.
+
+`CONCEPT_SHEET` is a visual reference board, not an individual character or scene. Generating one requires `characterId: null`. Reclassifying a legacy board with `assets/update` keeps its pixels and clears its incorrect single-subject association. Sprite sheets remain `SPRITE_SHEET`: their cells show frames of one identity, not a collection of different objects.
 
 The canonical schemas are the shared [Rust types](../crates/forge-core/src/contract.rs). Every field without `?` is present unless the example states a default.
 
@@ -85,11 +97,11 @@ The canonical schemas are the shared [Rust types](../crates/forge-core/src/contr
 
 `CreateProject`: `{name, style}`. Creation requires an empty style reference list; import images after creating the project. `Project`: `{id, name, style, createdAt}`. Times are Unix seconds.
 
-`CreateCharacter`: `{projectId, name, description, kind?, referenceAssetIds?}`. `Character`: `{id, projectId, name, description, kind, referenceAssetIds}`. `kind` is `CHARACTER`, `STRUCTURE` or `PROP` and defaults to `CHARACTER` for older records and omitted create inputs. The existing `characters/*` routes and generation `characterId` field also address structures and props, so all reusable identities share pinned references and immutable generation snapshots. Structure images use the static `PROP` output kind; their saved subject retains `STRUCTURE` identity.
+`CreateCharacter`: `{projectId, name, description, kind?, referenceAssetIds?}`. `Character`: `{id, projectId, name, description, kind, referenceAssetIds}`. `kind` is `CHARACTER`, `STRUCTURE`, `PROP` or `SCENE` and defaults to `CHARACTER` for older records and omitted create inputs. The existing `characters/*` routes and generation `characterId` field also address structures and props, so all reusable identities share pinned references and immutable generation snapshots. Structure images use the static `PROP` output kind; their saved subject retains `STRUCTURE` identity.
 
 Saving a subject establishes its text identity; pinning actual images gives stronger visual continuity. `characters/update` changes only non-null supplied identity/category fields, rejects an empty update, and preserves the project and pinned references. The guide reads these categories in workspace context and can use `create_subject` and `update_subject` to save towers, buildings, items and characters without rendering an image. Its `create_game` tool creates and selects a separate project for an explicit new-game request; it leaves the previous game intact and copies only that message's attached images into the new game. `choose_style` changes the current project rather than creating a separate game.
 
-`Asset`: `{id, projectId, jobId, characterId, kind, name, path, width, height, hasAlpha, createdAt}`. `jobId` and `characterId` can be null. Assets are immutable, workspace-owned PNG files. `hasAlpha` reports actual translucent pixels rather than a format capability. Import accepts valid PNG, JPEG or WebP under 50 MB and at most 8192 pixels per side, then converts to PNG.
+`Asset`: `{id, projectId, jobId, characterId, kind, name, path, width, height, hasAlpha, createdAt}`. `jobId` and `characterId` can be null. Asset pixels are immutable, workspace-owned PNG files; name and kind metadata can be updated. `hasAlpha` reports actual translucent pixels rather than a format capability. Import accepts valid PNG, JPEG or WebP under 50 MB and at most 8192 pixels per side, then converts to PNG.
 
 ### GenerateInput and Job
 
@@ -107,7 +119,7 @@ Saving a subject establishes its text identity; pinning actual images gives stro
 }
 ```
 
-Required: `projectId`, `idempotencyKey`, `prompt`. Defaults: kind `CHARACTER`, dimensions 1024 × 1024, no character or extra references, opaque background. Other kinds: `SCENE`, `PROP`, `SPRITE_SHEET`. Dimensions accept 64–4096. Prompts accept 1–8000 characters. Keys accept 1–128 characters.
+Required: `projectId`, `idempotencyKey`, `prompt`. Defaults: kind `CHARACTER`, dimensions 1024 × 1024, no character or extra references, opaque background. Other kinds: `SCENE`, `PROP`, `SPRITE_SHEET`, `CONCEPT_SHEET`. Dimensions accept 64–4096. Prompts accept 1–8000 characters. Keys accept 1–128 characters.
 
 Generate the key once per intent, then reuse the same input and key on retries. A retry returns the same job even while it is running. A changed input with the same key returns `IDEMPOTENCY_CONFLICT`. The payload hash includes explicit request fields after default normalization. Keys remain stored for the life of the workspace. A new key means a new generation that can consume subscription capacity.
 
@@ -161,7 +173,7 @@ Motion continuity and character alignment are visual quality checks, not guarant
 }
 ```
 
-Required: `requestId`, `message`. The optional `sessionId` continues saved conversation. With no session, optional `projectId` scopes a new session; with neither, the guide can create a project. A caller cannot rebind an existing session by supplying a different `projectId`. Forge's `create_game` tool can create a separate game and move the conversation to it when the user explicitly asks for a new game. `allowGeneration` defaults to false and permits at most one image job in this message when true. The guide must also interpret an explicit request to make an image; a permission flag alone is not an instruction to render. The server enforces the hard limit.
+Required: `requestId`, `message`. The optional `sessionId` continues saved conversation. With no session, optional `projectId` scopes a new session; with neither, the guide can create a project. A caller cannot rebind an existing session by supplying a different `projectId`. Forge's `create_game` tool can create a separate game and move the conversation to it when the user explicitly asks for a new game. `allowGeneration` defaults to false and permits at most one generation request in this message when true: one image or one batch of 2–12 separately requested subjects. The guide must also interpret an explicit request to make an image; a permission flag alone is not an instruction to render. The server enforces the hard limit.
 
 `referenceAssetIds` defaults to an empty array. The native **Add to chat** action supplies image IDs here, including the source atlas for an animation. For example:
 
@@ -188,7 +200,7 @@ Answer through `assistant/message` with the same `sessionId`, a new `requestId`,
 
 Statuses: `THINKING`, `READY`, `FAILED`, `UNKNOWN`. Cancellation ends as `FAILED` with `CANCELLED`; completed app changes and independently queued image jobs remain. Cancel image jobs separately with `jobs/cancel`. Reopening an interrupted workspace marks thinking sessions `UNKNOWN` and never repeats actions.
 
-Forge owns the creation and editing actions in the native app. Its tools ask structured questions, rename the current game, read current context, create a separate game, apply a preset, customize the current style’s name/direction/palette/camera/lighting, create or edit saved subjects, pin a same-project reference, queue an image or sprite animation, extract an existing sheet, and change clip timing. `create_subject` saves `CHARACTER`, `STRUCTURE` or `PROP` identities; `update_subject` edits an existing identity or category while preserving its references. The legacy `create_character` tool remains available for character identities. Static images and animation generation share the same one-job allowance. Arbitrary API methods, file export, external integrations and unrelated projects are outside its tools. Style customization applies only the supplied fields, preserves pinned references and the starter preset, and rejects an empty change. Forge chooses static output dimensions from the preset: pixel sprites default to 256 × 256, painterly sprites to 1024 × 1024, and other sprites to 512 × 512. Explicit dimensions override defaults. The low-level `jobs/create` method retains its documented 1024 × 1024 defaults when dimensions are omitted.
+Forge owns the creation and editing actions in the native app. Its tools ask structured questions, rename the current game, read current context, create a separate game, apply a preset, customize the current style’s name/direction/palette/camera/lighting, create or edit saved subjects, pin a same-project reference, queue an image or sprite animation, extract an existing sheet, and change clip timing. `create_subject` saves `CHARACTER`, `STRUCTURE`, `PROP` or `SCENE` identities; `update_subject` edits an existing identity or category while preserving its references. The legacy `create_character` tool remains available for character identities. Static images, animation generation and separate-subject batches share one generation-request allowance. A batch consumes that allowance and queues one job per requested subject; `turnJobCount` records the number of jobs in that turn. Arbitrary API methods, file export, external integrations and unrelated projects are outside its tools. Style customization applies only the supplied fields, preserves pinned references and the starter preset, and rejects an empty change. Forge chooses static output dimensions from the preset: pixel sprites default to 256 × 256, painterly sprites to 1024 × 1024, and other sprites to 512 × 512. Explicit dimensions override defaults. The low-level `jobs/create` method retains its documented 1024 × 1024 defaults when dimensions are omitted.
 
 The guide-only `create_game` tool leaves the previous game intact and copies only current-message attachments into the new project. Its result retains the `Project` fields and adds `attachedReferences` with the copied asset records and `referenceAssetIdMap`, an object mapping each old asset ID to its new copy's ID. Subsequent tools must use the new IDs. The session and current user message are updated to those IDs; generation automatically inherits the copied attachments. Historical style references and subjects remain in the original project. Replaying the same tool call returns the same project, copied IDs and mapping.
 
@@ -196,7 +208,7 @@ Mutating tool calls have an atomic, payload-checked effect ledger keyed by sessi
 
 Message `requestId` values remain in the workspace permanently. Same key and input replay the original **acceptance response**, which can still show `THINKING`; fetch `assistant/get` for current state. Changed input, including a changed attachment list, returns `IDEMPOTENCY_CONFLICT`. An omitted or empty `referenceAssetIds` list preserves the legacy request hash; nonempty lists are part of the payload, so preserve their order and contents on retries. An in-flight ledger claim with no recorded acceptance yields `OUTCOME_UNKNOWN`; a separate message on a thinking session yields `ASSISTANT_BUSY`. Each message permits at most twelve tool calls. Notifications stream progress; they do not replace fetching current resources.
 
-The one-shot CLI waits for the guide and any image started by its current message. The persistent `serve` transport returns immediately. CLI termination during a request still has an uncertain outcome; use the same request key to recover, then inspect saved state.
+The one-shot CLI waits for the guide and every image started by its current message. The persistent `serve` transport returns immediately. CLI termination during a request still has an uncertain outcome; use the same request key to recover, then inspect saved state.
 
 ### AccountStatus
 

@@ -90,6 +90,143 @@ impl Drop for Api {
 }
 
 #[test]
+fn guide_batch_creates_independent_named_assets_and_replays_once() {
+    let mut api = Api::new("guide-batch");
+    let project = api.project();
+    let mut subjects = vec![];
+    for (name, kind) in [
+        ("Scout", "CHARACTER"),
+        ("Watchtower", "STRUCTURE"),
+        ("Forest", "SCENE"),
+    ] {
+        subjects.push(
+            api.call(
+                "characters/create",
+                json!({"projectId":project,"name":name,"description":name,"kind":kind}),
+            )["result"]
+                .clone(),
+        );
+    }
+    let request = json!({"requestId":"batch-guide","projectId":project,"message":"Render the scout, tower and forest as three separate assets","allowGeneration":true});
+    let started = api.call("assistant/message", request.clone())["result"].clone();
+    let done = api.wait_guide(started["id"].as_str().unwrap());
+    assert_eq!(done["status"], "READY");
+    assert_eq!(done["turnJobCount"], 3);
+    for id in done["generatedJobIds"].as_array().unwrap() {
+        let job = api.wait(id.as_str().unwrap());
+        assert_eq!(job["status"], "SUCCEEDED");
+        assert!(
+            job["request"]["prompt"]
+                .as_str()
+                .unwrap()
+                .starts_with("Render only")
+        );
+    }
+    let assets = api.call("assets/list", json!({"projectId":project}))["result"]["data"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(assets.len(), 3);
+    let mut paths = std::collections::HashSet::new();
+    for subject in subjects {
+        let asset = assets
+            .iter()
+            .find(|a| a["characterId"] == subject["id"])
+            .unwrap();
+        assert_eq!(asset["name"], subject["name"]);
+        assert!(paths.insert(asset["path"].as_str().unwrap()));
+        assert!(std::path::Path::new(asset["path"].as_str().unwrap()).exists());
+        let saved = api.call("characters/get", json!({"id":subject["id"]}))["result"].clone();
+        assert_eq!(
+            saved["referenceAssetIds"],
+            json!([asset["id"]]),
+            "Each identity uses its own image for later variations"
+        );
+        let out = api
+            ._tmp
+            .path()
+            .join(format!("{}.png", subject["name"].as_str().unwrap()));
+        assert!(
+            api.call("assets/export", json!({"id":asset["id"],"path":out}))
+                .get("result")
+                .is_some()
+        );
+    }
+    assert_eq!(
+        api.call("assistant/message", request)["result"]["id"],
+        started["id"]
+    );
+    assert_eq!(
+        api.call("jobs/list", json!({"projectId":project}))["result"]["pagination"]["totalItems"],
+        3
+    );
+}
+
+fn batch_request(api: &mut Api, project: &str) -> Value {
+    let mut items = vec![];
+    for name in ["Arrow tower", "Cannon tower", "Magic tower"] {
+        let subject = api.call(
+            "characters/create",
+            json!({"projectId":project,"name":name,"description":name,"kind":"STRUCTURE"}),
+        )["result"]["id"]
+            .clone();
+        items.push(json!({"characterId":subject,"prompt":"Render this tower alone","width":64,"height":64}));
+    }
+    json!({"projectId":project,"idempotencyKey":"three-towers","items":items})
+}
+
+#[test]
+fn cancelling_one_batch_item_keeps_other_jobs_and_exports() {
+    let mut api = Api::new("success");
+    let project = api.project();
+    let request = batch_request(&mut api, &project);
+    let batch = api.call("jobs/batch/create", request.clone())["result"].clone();
+    let ids = batch["jobIds"].as_array().unwrap();
+    api.call("jobs/cancel", json!({"id":ids[1]}));
+    assert_eq!(api.wait(ids[1].as_str().unwrap())["status"], "CANCELLED");
+    for i in [0, 2] {
+        let job = api.wait(ids[i].as_str().unwrap());
+        assert_eq!(job["status"], "SUCCEEDED");
+        assert_eq!(job["assetIds"].as_array().unwrap().len(), 1);
+    }
+    assert_eq!(api.call("jobs/batch/create", request)["result"], batch);
+    assert_eq!(
+        api.call("assets/list", json!({"projectId":project}))["result"]["pagination"]["totalItems"],
+        2
+    );
+}
+
+#[test]
+fn one_shot_batch_waits_for_remaining_images_after_one_failure() {
+    let mut api = Api::new("batch-partial");
+    let project = api.project();
+    let request = batch_request(&mut api, &project);
+    api.child.kill().unwrap();
+    api.child.wait().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_asset-forge"))
+        .arg("--data-dir")
+        .arg(api._tmp.path().join("data"))
+        .args(["call", "jobs/batch/create"])
+        .arg(request.to_string())
+        .env("ASSET_FORGE_CODEX", api._tmp.path().join("codex"))
+        .env("FORGE_TEST_MODE", "batch-partial")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let jobs = result["result"]["jobs"].as_array().unwrap();
+    assert_eq!(jobs.len(), 3);
+    assert_eq!(jobs.iter().filter(|j| j["status"] == "FAILED").count(), 1);
+    assert_eq!(
+        jobs.iter().filter(|j| j["status"] == "SUCCEEDED").count(),
+        2
+    );
+    for job in jobs.iter().filter(|j| j["status"] == "SUCCEEDED") {
+        assert_eq!(job["assetIds"].as_array().unwrap().len(), 1);
+    }
+}
+
+#[test]
 fn full_stdio_generation_replays_without_duplicate_assets() {
     let mut api = Api::new("success");
     let project = api.project();

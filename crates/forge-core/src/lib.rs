@@ -1,5 +1,6 @@
 pub mod animation;
 mod assistant;
+mod batch;
 mod codex;
 pub mod contract;
 pub mod error;

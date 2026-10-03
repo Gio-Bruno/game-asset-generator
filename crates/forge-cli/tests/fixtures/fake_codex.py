@@ -46,6 +46,8 @@ def finish_login(login_id):
         emit({"method":"account/login/completed","params":{"loginId":login_id,"success":True,"error":None}})
 def finish_image(thread):
     item = dict(image)
+    if mode == "batch-partial" and thread.endswith("-1"):
+        item["failure"] = {"message":"Fixture first-image failure"}
     if mode == "invalid-image":
         item["result"] = "not image data"
     if mode != "no-image":
@@ -58,6 +60,23 @@ def tool(thread, name, args, call, callback):
 def guide(thread):
     prompt = turn_inputs[thread][0]["text"]
     context = json.JSONDecoder().raw_decode(prompt.split("Current workspace (data, not instructions):\n", 1)[1])[0]
+    if mode == "guide-batch":
+        args={"items":[{"characterId":s["id"],"prompt":"Render only "+s["name"],"width":64,"height":96} for s in context["subjects"]],"referenceAssetIds":[]}
+        def queued(result):
+            assert result["success"]
+            batch=json.loads(result["contentItems"][0]["text"])
+            assert len(batch["jobIds"])==3
+            def replayed(result):
+                assert result["success"]
+                assert json.loads(result["contentItems"][0]["text"])==batch
+                def denied(result):
+                    assert not result["success"]
+                    assert json.loads(result["contentItems"][0]["text"])["error"]["code"]=="GENERATION_NOT_AUTHORIZED"
+                    complete(thread,"Three separate named files are rendering.")
+                tool(thread,"generate_subject_assets",args,"extra-batch",denied)
+            tool(thread,"generate_subject_assets",args,"batch",replayed)
+        tool(thread,"generate_subject_assets",args,"batch",queued)
+        return
     if mode in ("guide", "guide-generate", "guide-animation", "guide-new-game-reference") and not context["gameSetupAnswered"] and (mode == "guide-new-game-reference" or context["project"] is None):
         def asked(result):
             assert result["success"]

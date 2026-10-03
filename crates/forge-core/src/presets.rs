@@ -34,7 +34,7 @@ pub fn selected_id(style: &StyleGuide) -> Option<String> {
 /// One source of defaults for the native composer and art director.
 pub fn output_size(style: &StyleGuide, kind: AssetKind) -> (u32, u32) {
     let preset = selected_id(style).and_then(|id| get(&id).ok());
-    if kind == AssetKind::Scene {
+    if matches!(kind, AssetKind::Scene | AssetKind::ConceptSheet) {
         preset
             .map(|p| (p.scene_width, p.scene_height))
             .unwrap_or((1536, 1024))
