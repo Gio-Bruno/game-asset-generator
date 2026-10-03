@@ -1,0 +1,11 @@
+{
+  "name": "Woodland demo",
+  "style": {
+    "name": "Woodland ink",
+    "description": "2D hand-painted game art. Clear rounded silhouettes, subtle paper texture, thin dark green outlines, warm woodland colors.",
+    "palette": ["#315C4B", "#D7AD70", "#F1E9D5"],
+    "perspective": "Side view, orthographic",
+    "lighting": "Soft light from upper left",
+    "referenceAssetIds": []
+  }
+}

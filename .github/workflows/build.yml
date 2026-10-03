@@ -1,0 +1,53 @@
+name: Build and test
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo test --locked -p forge-core -p forge-cli
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: python scripts/package.py
+      - name: Verify packaged CLI
+        run: python scripts/smoke_package.py
+      - name: Verify Windows app opens
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:ASSET_FORGE_DATA_DIR = Join-Path $env:RUNNER_TEMP 'forge-gui-smoke'
+          $app = Start-Process -FilePath './target/release/asset-forge-studio.exe' -PassThru -RedirectStandardError './dist/windows-startup.log'
+          try {
+            $deadline = (Get-Date).AddSeconds(30)
+            do {
+              Start-Sleep -Milliseconds 500
+              $app.Refresh()
+              if ($app.HasExited) {
+                Get-Content './dist/windows-startup.log'
+                throw "Asset Forge exited during startup: $($app.ExitCode)"
+              }
+            } while ($app.MainWindowHandle -eq 0 -and (Get-Date) -lt $deadline)
+            if ($app.MainWindowHandle -eq 0 -or -not $app.Responding) {
+              throw 'Asset Forge did not open a responsive native window.'
+            }
+            Write-Output "Opened responsive window: $($app.MainWindowTitle)"
+          } finally {
+            if (-not $app.HasExited) { Stop-Process -Id $app.Id }
+          }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: asset-forge-${{ matrix.os }}
+          path: dist/*

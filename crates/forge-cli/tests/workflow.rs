@@ -1,0 +1,411 @@
+#![cfg(unix)]
+use serde_json::{Value, json};
+use std::{
+    io::{BufRead, BufReader, Write},
+    os::unix::fs::PermissionsExt,
+    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
+};
+
+struct Api {
+    child: Child,
+    input: ChildStdin,
+    output: BufReader<ChildStdout>,
+    _tmp: tempfile::TempDir,
+    next: u64,
+    notifications: Vec<Value>,
+}
+impl Api {
+    fn new(mode: &str) -> Self {
+        let tmp = tempfile::tempdir().unwrap();
+        let fake = tmp.path().join("codex");
+        std::fs::write(&fake, include_str!("fixtures/fake_codex.py")).unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_asset-forge"))
+            .args([
+                "--data-dir",
+                tmp.path().join("data").to_str().unwrap(),
+                "serve",
+            ])
+            .env("ASSET_FORGE_CODEX", fake)
+            .env("FORGE_TEST_MODE", mode)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let input = child.stdin.take().unwrap();
+        let output = BufReader::new(child.stdout.take().unwrap());
+        Self {
+            child,
+            input,
+            output,
+            _tmp: tmp,
+            next: 0,
+            notifications: vec![],
+        }
+    }
+    fn call(&mut self, method: &str, params: Value) -> Value {
+        self.next += 1;
+        writeln!(
+            self.input,
+            "{}",
+            json!({"id":self.next,"method":method,"params":params})
+        )
+        .unwrap();
+        self.input.flush().unwrap();
+        loop {
+            let mut line = String::new();
+            assert!(self.output.read_line(&mut line).unwrap() > 0, "API closed");
+            let value: Value = serde_json::from_str(&line).unwrap();
+            if value["method"] == "events/notification" {
+                self.notifications.push(value["params"].clone());
+            }
+            if value["id"] == self.next {
+                return value;
+            }
+        }
+    }
+    fn project(&mut self) -> String {
+        self.call("projects/create",json!({"name":"Fixture Game","style":{"name":"Ink","description":"Pixel art with forest greens"}}))["result"]["id"].as_str().unwrap().into()
+    }
+    fn create(&mut self, p: &str) -> Value {
+        self.call("jobs/create",json!({"projectId":p,"idempotencyKey":"intent-1","prompt":"A forest scout","width":64,"height":96,"transparentBackground":true}))["result"].clone()
+    }
+    fn wait(&mut self, id: &str) -> Value {
+        for _ in 0..200 {
+            let job = self.call("jobs/get", json!({"id":id}))["result"].clone();
+            if !["QUEUED", "RUNNING"].contains(&job["status"].as_str().unwrap()) {
+                return job;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        panic!("Fixture job never completed");
+    }
+}
+impl Drop for Api {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[test]
+fn full_stdio_generation_replays_without_duplicate_assets() {
+    let mut api = Api::new("success");
+    let project = api.project();
+    let created = api.create(&project);
+    let id = created["id"].as_str().unwrap();
+    let job = api.wait(id);
+    assert_eq!(job["status"], "SUCCEEDED");
+    let duplicate = api.create(&project);
+    assert_eq!(duplicate["id"], id);
+    assert_eq!(duplicate["status"], "SUCCEEDED");
+    let assets = api.call("assets/list", json!({"projectId":project}));
+    let data = assets["result"]["data"].as_array().unwrap();
+    assert_eq!(data.len(), 1);
+    assert_eq!(data[0]["width"], 64);
+    assert_eq!(data[0]["height"], 96);
+    assert_eq!(data[0]["hasAlpha"], true);
+    assert_eq!(api.call("jobs/create",json!({"projectId":project,"idempotencyKey":"intent-1","prompt":"Changed","width":64,"height":96,"transparentBackground":true}))["error"]["code"],"IDEMPOTENCY_CONFLICT");
+}
+
+#[test]
+fn generated_animation_extracts_six_frames_and_replays_one_job() {
+    let mut api = Api::new("animation");
+    let project = api.project();
+    let character = api.call(
+        "characters/create",
+        json!({"projectId":project,"name":"Mira","description":"Forest scout"}),
+    )["result"]["id"]
+        .clone();
+    let request = json!({"projectId":project,"characterId":character,"idempotencyKey":"walk-1","config":{"name":"Walk","motion":"WALK","frameWidth":16,"frameHeight":16}});
+    let created = api.call("animations/create", request.clone())["result"].clone();
+    let id = created["id"].as_str().unwrap();
+    let job = api.wait(id);
+    assert_eq!(job["status"], "SUCCEEDED");
+    assert_eq!(job["request"]["animation"]["motion"], "WALK");
+    let clip = api.call("animations/get", json!({"id":id}))["result"].clone();
+    assert_eq!(clip["frames"].as_array().unwrap().len(), 6);
+    assert!(std::path::Path::new(clip["previewPath"].as_str().unwrap()).exists());
+    assert_eq!(api.call("animations/create", request)["result"]["id"], id);
+    assert_eq!(
+        api.call("assets/list", json!({"projectId":project}))["result"]["data"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    api.call(
+        "animations/timing/update",
+        json!({"id":id,"fps":12,"isLooping":false}),
+    );
+    assert_eq!(
+        api.call("jobs/get", json!({"id":id}))["result"]["request"]["animation"]["fps"],
+        8
+    );
+    let export = api._tmp.path().join("walk.zip");
+    assert!(
+        api.call("animations/export", json!({"id":id,"path":export}))
+            .get("result")
+            .is_some()
+    );
+}
+
+#[test]
+fn guide_animation_uses_the_shared_generation_budget() {
+    let mut api = Api::new("guide-animation");
+    let started=api.call("assistant/message",json!({"requestId":"animate-guide","message":"Make a forest scout and a walk cycle","allowGeneration":true}));
+    let id = started["result"]["id"].as_str().unwrap();
+    let mut done = Value::Null;
+    for _ in 0..200 {
+        done = api.call("assistant/get", json!({"id":id}))["result"].clone();
+        if done["status"] != "THINKING" {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(done["status"], "READY");
+    assert_eq!(done["turnJobCount"], 1);
+    let jobs = done["generatedJobIds"].as_array().unwrap();
+    assert_eq!(jobs.len(), 1);
+    let job = api.wait(jobs[0].as_str().unwrap());
+    assert_eq!(job["status"], "SUCCEEDED");
+    assert_eq!(
+        api.call("animations/get", json!({"id":jobs[0]}))["result"]["frames"]
+            .as_array()
+            .unwrap()
+            .len(),
+        6
+    );
+}
+#[test]
+fn provider_failure_and_invalid_pixels_are_not_success() {
+    for (mode, code) in [
+        ("failed", "GENERATION_FAILED"),
+        ("invalid-image", "INVALID_IMAGE"),
+        ("no-image", "NO_IMAGE_GENERATED"),
+        ("unavailable", "IMAGE_GENERATION_UNAVAILABLE"),
+    ] {
+        let mut api = Api::new(mode);
+        let project = api.project();
+        let created = api.create(&project);
+        let job = api.wait(created["id"].as_str().unwrap());
+        assert_eq!(job["status"], "FAILED");
+        assert_eq!(job["error"]["code"], code);
+    }
+}
+#[test]
+fn disconnect_is_unknown_and_cancellation_interrupts() {
+    let mut api = Api::new("disconnect");
+    let p = api.project();
+    let job = api.create(&p);
+    assert_eq!(api.wait(job["id"].as_str().unwrap())["status"], "UNKNOWN");
+    let mut api = Api::new("slow");
+    let p = api.project();
+    let job = api.create(&p);
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    api.call("jobs/cancel", json!({"id":job["id"]}));
+    assert_eq!(api.wait(job["id"].as_str().unwrap())["status"], "CANCELLED");
+}
+
+impl Api {
+    fn wait_guide(&mut self, id: &str) -> Value {
+        for _ in 0..200 {
+            let session = self.call("assistant/get", json!({"id":id}))["result"].clone();
+            if session["status"] != "THINKING" {
+                return session;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        panic!("Fixture guide never completed");
+    }
+}
+#[test]
+fn guide_actions_are_scoped_and_replayed_without_duplicate_characters_or_images() {
+    for permitted in [false, true] {
+        let mut api = Api::new("guide-generate");
+        let input = json!({"requestId":"setup-1","message":"Set up a woodland game and make Mira.","allowGeneration":permitted});
+        let accepted = api.call("assistant/message", input.clone())["result"].clone();
+        let id = accepted["id"].as_str().unwrap();
+        let session = api.wait_guide(id);
+        assert_eq!(session["status"], "READY", "{session}");
+        let project = session["projectId"].as_str().unwrap();
+        let characters =
+            api.call("characters/list", json!({"projectId":project}))["result"]["data"]
+                .as_array()
+                .unwrap()
+                .clone();
+        assert_eq!(characters.len(), 1);
+        assert_eq!(
+            api.call("projects/get", json!({"id":project}))["result"]["style"]["name"],
+            "Woodland ink"
+        );
+        assert_eq!(
+            api.call("assistant/message", input.clone())["result"]["id"],
+            id
+        );
+        assert_eq!(
+            api.call("projects/list", json!({}))["result"]["data"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            api.call("characters/list", json!({"projectId":project}))["result"]["data"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        let jobs = api.call("jobs/list", json!({"projectId":project}))["result"]["data"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(jobs.len(), usize::from(permitted));
+        if permitted {
+            let job = api.wait(jobs[0]["id"].as_str().unwrap());
+            assert_eq!(job["status"], "SUCCEEDED");
+            assert_eq!(session["generatedJobIds"].as_array().unwrap().len(), 1);
+        }
+        let mut changed = input;
+        changed["message"] = json!("A different request");
+        assert_eq!(
+            api.call("assistant/message", changed)["error"]["code"],
+            "IDEMPOTENCY_CONFLICT"
+        );
+        let foreign = api.project();
+        assert_eq!(api.call("assistant/message",json!({"requestId":"scope-2","sessionId":id,"projectId":foreign,"message":"Change another game"}))["error"]["code"],"VALIDATION_ERROR");
+    }
+}
+#[test]
+fn guide_disconnect_is_unknown_and_duplicate_message_does_not_restart_it() {
+    let mut api = Api::new("guide-disconnect");
+    let input = json!({"requestId":"lost-1","message":"Set up a game"});
+    let accepted = api.call("assistant/message", input.clone())["result"].clone();
+    let id = accepted["id"].as_str().unwrap();
+    let session = api.wait_guide(id);
+    assert_eq!(session["status"], "UNKNOWN");
+    assert_eq!(session["error"]["code"], "CODEX_DISCONNECTED");
+    assert_eq!(api.call("assistant/message", input)["result"]["id"], id);
+    assert_eq!(
+        api.call("assistant/get", json!({"id":id}))["result"]["status"],
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn guide_busy_and_cancellation_preserve_the_accepted_intent() {
+    let mut api = Api::new("slow");
+    let input = json!({"requestId":"slow-guide-1","message":"Develop a game"});
+    let session = api.call("assistant/message", input.clone())["result"].clone();
+    let id = session["id"].as_str().unwrap();
+    assert_eq!(
+        api.call(
+            "assistant/message",
+            json!({"requestId":"next-guide-2","sessionId":id,"message":"Another request"})
+        )["error"]["code"],
+        "ASSISTANT_BUSY"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    api.call("assistant/cancel", json!({"id":id}));
+    let final_session = api.wait_guide(id);
+    assert_eq!(final_session["status"], "FAILED");
+    assert_eq!(final_session["error"]["code"], "CANCELLED");
+    assert_eq!(api.call("assistant/message", input)["result"]["id"], id);
+    assert_eq!(
+        api.call("projects/list", json!({}))["result"]["data"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn guided_style_customization_keeps_references_and_preset_dimensions() {
+    let mut api = Api::new("guide-custom");
+    let catalog = api.call("styles/presets/list", json!({}))["result"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let mut style = catalog.iter().find(|p| p["id"] == "paint").unwrap()["style"].clone();
+    let project = api.call(
+        "projects/create",
+        json!({"name":"Custom Game","style":style}),
+    )["result"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/generated/mira-idle.png");
+    let asset = api.call(
+        "assets/import",
+        json!({"projectId":project,"path":path,"name":"Pinned reference"}),
+    )["result"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    style["referenceAssetIds"] = json!([asset]);
+    api.call(
+        "projects/style/update",
+        json!({"projectId":project,"style":style}),
+    );
+    let session=api.call("assistant/message",json!({"requestId":"customize-1","projectId":project,"message":"Give my game a moonlit palette and create a character.","allowGeneration":true}))["result"].clone();
+    let session = api.wait_guide(session["id"].as_str().unwrap());
+    assert_eq!(session["status"], "READY", "{session}");
+    let project_state = api.call("projects/get", json!({"id":project}))["result"].clone();
+    assert_eq!(project_state["name"], "Custom Game");
+    assert_eq!(project_state["style"]["name"], "Moonlit story");
+    assert_eq!(
+        project_state["style"]["palette"],
+        json!(["#7386A4", "#C8D0E2"])
+    );
+    assert_eq!(project_state["style"]["presetId"], "paint");
+    assert_eq!(project_state["style"]["referenceAssetIds"], json!([asset]));
+    let job = api.wait(session["generatedJobIds"][0].as_str().unwrap());
+    assert_eq!(job["status"], "SUCCEEDED");
+    assert_eq!(job["request"]["width"], 1024);
+    assert_eq!(job["request"]["height"], 1024);
+    assert_eq!(job["styleSnapshot"], project_state["style"]);
+    assert_eq!(job["referenceAssetIds"], json!([asset]));
+}
+
+#[test]
+fn login_cancellation_and_completion_refresh_account_state() {
+    let mut api = Api::new("login");
+    assert_eq!(
+        api.call("account/read", json!({}))["result"]["isLoggedIn"],
+        false
+    );
+    let first = api.call("account/login/start", json!({}))["result"].clone();
+    assert_eq!(
+        first["authUrl"],
+        "https://auth.openai.com/authorize?fixture=true"
+    );
+    assert_eq!(
+        api.call("account/login/cancel", json!({"id":first["loginId"]}))["result"]["isCancelled"],
+        true
+    );
+    std::thread::sleep(std::time::Duration::from_millis(180));
+    assert_eq!(
+        api.call("account/read", json!({}))["result"]["isLoggedIn"],
+        false
+    );
+    api.call("account/login/start", json!({}));
+    for _ in 0..40 {
+        let status = api.call("account/read", json!({}))["result"].clone();
+        if status["isLoggedIn"] == true {
+            assert_eq!(status["canGenerateImages"], true);
+            api.call("account/read", json!({}));
+            assert!(
+                api.notifications
+                    .iter()
+                    .any(|n| n["kind"] == "ACCOUNT_CONNECTED")
+            );
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!("Login completion did not refresh account state");
+}

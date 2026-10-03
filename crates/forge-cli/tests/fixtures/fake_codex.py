@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+"""Deterministic subprocess fixture. It never contacts OpenAI."""
+import base64
+import json
+import os
+import struct
+import sys
+import threading
+import zlib
+if "mcp" in sys.argv:
+    print("[]")
+    sys.exit(0)
+mode = os.environ.get("FORGE_TEST_MODE", "success")
+output_lock = threading.Lock()
+threads = {}
+sequence = 0
+login_state={"loggedIn":False,"active":None,"sequence":0}
+pending_tools = {}
+def emit(value):
+    with output_lock:
+        print(json.dumps(value), flush=True)
+def chunk(name, data):
+    return struct.pack(">I", len(data)) + name + data + struct.pack(">I", zlib.crc32(name + data))
+pixels = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 2, 2, 8, 6, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(b"\x00" + bytes([30, 90, 70, 128]) * 2 + b"\x00" + bytes([30, 90, 70, 128]) * 2)) + chunk(b"IEND", b"")
+if mode in ("animation","guide-animation"):
+    rows=[]
+    for y in range(32):
+        row=bytearray([0])
+        for x in range(48):
+            cell=(y//16)*3+x//16
+            row.extend([30+cell*30,90,70,0 if x%16==0 or y%16==0 else 255])
+        rows.append(row)
+    pixels=b"\x89PNG\r\n\x1a\n"+chunk(b"IHDR",struct.pack(">IIBBBBB",48,32,8,6,0,0,0))+chunk(b"IDAT",zlib.compress(b"".join(rows)))+chunk(b"IEND",b"")
+image = {"id": "image-1", "type": "imageGeneration", "status": "completed", "result": base64.b64encode(pixels).decode(), "savedPath": None, "failure": None}
+def complete(thread, text=None):
+    if text is not None:
+        emit({"method":"item/agentMessage/delta","params":{"threadId":thread,"turnId":thread,"delta":text}})
+        emit({"method":"item/completed","params":{"threadId":thread,"turnId":thread,"item":{"type":"agentMessage","text":text}}})
+    emit({"method": "turn/completed", "params": {"threadId": thread, "turn": {"id": thread, "status": "failed" if mode == "failed" else "completed", "error": {"message": "Fixture provider error"}, "items": []}}})
+def finish_login(login_id):
+    if login_state["active"]==login_id:
+        login_state["loggedIn"]=True
+        login_state["active"]=None
+        emit({"method":"account/login/completed","params":{"loginId":login_id,"success":True,"error":None}})
+def finish_image(thread):
+    item = dict(image)
+    if mode == "invalid-image":
+        item["result"] = "not image data"
+    if mode != "no-image":
+        emit({"method": "item/completed", "params": {"threadId": thread, "turnId": thread, "item": item}})
+    complete(thread)
+def tool(thread, name, args, call, callback):
+    request_id = "tool-" + thread + "-" + call + "-" + str(len(pending_tools))
+    pending_tools[request_id] = callback
+    emit({"id":request_id,"method":"item/tool/call","params":{"threadId":thread,"turnId":thread,"callId":call,"tool":name,"arguments":args}})
+def guide(thread):
+    def after_style(result):
+        assert result["success"]
+        tool(thread,"create_character",{"name":"Mira","description":"A forest scout with chestnut hair and an amber scarf."},"character",after_character)
+    def after_character(result):
+        assert result["success"]
+        character=json.loads(result["contentItems"][0]["text"])["id"]
+        def replay_character(result):
+            assert result["success"]
+            assert json.loads(result["contentItems"][0]["text"])["id"]==character
+            if mode=="guide":
+                complete(thread,"Saved the woodland style and Mira. Ask me to make her first pose.")
+            else:
+                args={"kind":"CHARACTER","prompt":"Mira idle pose","characterId":character,"referenceAssetIds":[],"width":None if mode=="guide-custom" else 64,"height":None if mode=="guide-custom" else 96,"transparentBackground":True}
+                def first_image(result):
+                    if result["success"]:
+                        first=json.loads(result["contentItems"][0]["text"])["id"]
+                        def replay_image(result):
+                            assert result["success"]
+                            assert json.loads(result["contentItems"][0]["text"])["id"]==first
+                            tool(thread,"generate_asset",args,"second-image",denied)
+                        tool(thread,"generate_asset",args,"image",replay_image)
+                    else:
+                        denied(result)
+                def denied(result):
+                    assert not result["success"]
+                    assert json.loads(result["contentItems"][0]["text"])["error"]["code"]=="GENERATION_NOT_AUTHORIZED"
+                    complete(thread,"Workspace updated; generation budget respected.")
+                if mode=="guide-animation":
+                    args={"characterId":character,"motion":"WALK","name":None,"prompt":"Walking right","frameCount":6,"columns":3,"frameSize":16,"fps":8,"isLooping":True}
+                    # Both generation tools share the same per-message budget.
+                    def animate_done(result):
+                        assert result["success"]
+                        tool(thread,"generate_animation",args,"image",lambda replay: (
+                            tool(thread,"generate_asset",{"kind":"CHARACTER","prompt":"Another pose","characterId":character,"referenceAssetIds":[],"width":64,"height":96,"transparentBackground":True},"second-image",denied)
+                        ))
+                    tool(thread,"generate_animation",args,"image",animate_done)
+                else:
+                    tool(thread,"generate_asset",args,"image",first_image)
+        # Repeat the exact server call to verify app-side deduplication.
+        tool(thread,"create_character",{"name":"Mira","description":"A forest scout with chestnut hair and an amber scarf."},"character",replay_character)
+    if mode=="guide-custom":
+        tool(thread,"customize_style",{"name":"Moonlit story","description":None,"palette":["#7386A4","#C8D0E2"],"perspective":None,"lighting":"Cool moonlight from upper left"},"style",after_style)
+    else:
+        tool(thread,"choose_style",{"presetId":"woodland","projectName":"Fixture Woodland","extraDirection":None},"style",after_style)
+
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request.get("method")
+    if "id" not in request:
+        continue
+    if method is None:
+        callback=pending_tools.pop(request["id"])
+        callback(request["result"])
+        continue
+    result = {}
+    if method == "account/read":
+        account={"type":"chatgpt","email":"test@example.invalid","planType":"plus"}
+        result={"account":None if mode=="login" and not login_state["loggedIn"] else account,"requiresOpenaiAuth":True}
+    elif method=="account/login/start":
+        assert request["params"]["type"]=="chatgpt"
+        login_state["sequence"]+=1
+        login_id="login-"+str(login_state["sequence"])
+        login_state["active"]=login_id
+        result={"type":"chatgpt","loginId":login_id,"authUrl":"https://auth.openai.com/authorize?fixture=true"}
+        timer=threading.Timer(0.15,finish_login,args=(login_id,));timer.daemon=True;timer.start()
+    elif method=="account/login/cancel":
+        if request["params"]["loginId"]==login_state["active"]:
+            login_state["active"]=None
+    elif method == "modelProvider/capabilities/read":
+        result = {"imageGeneration": mode != "unavailable", "webSearch": False, "namespaceTools": True}
+    elif method == "thread/start":
+        assert request["params"]["sandbox"] == "read-only"
+        assert request["params"]["approvalPolicy"] == "never"
+        sequence+=1
+        thread="thread-"+str(sequence)
+        threads[thread]=bool(request["params"].get("dynamicTools"))
+        result = {"thread": {"id": thread}}
+    elif method == "turn/start":
+        thread=request["params"]["threadId"]
+        if not threads[thread]:
+            assert "native image generation" in request["params"]["input"][0]["text"]
+        result = {"turn": {"id": thread}}
+    elif method == "turn/interrupt":
+        thread=request["params"]["threadId"]
+        emit({"method": "turn/completed", "params": {"threadId": thread, "turn": {"id": thread, "status": "interrupted", "items": []}}})
+    emit({"id": request["id"], "result": result})
+    if method == "turn/start":
+        thread=request["params"]["threadId"]
+        if mode in ("disconnect","guide-disconnect"):
+            sys.exit(0)
+        if threads[thread]:
+            timer=threading.Timer(0.05,guide,args=(thread,))
+        else:
+            emit({"method": "item/started", "params": {"threadId": thread, "item": {"id": "image-1", "type": "imageGeneration"}}})
+            timer=threading.Timer(0.05,finish_image,args=(thread,))
+        if mode != "slow":
+            timer.daemon=True
+            timer.start()
