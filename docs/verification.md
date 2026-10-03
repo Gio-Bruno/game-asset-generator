@@ -1,5 +1,12 @@
 # Current verification
 
+## Installer updates in 0.1.2
+
+The Update button now checks and downloads newer stable GitHub releases, then offers Restart & install. It checks the expected platform asset, HTTPS origin/redirect hosts, size and SHA-256 digest. macOS additionally validates archive paths, package/binary metadata and code signature, copies beside the installed app and retains/restores its previous bundle. Windows uses the existing NSIS installer in the current installation directory. A detached CLI helper waits for app exit, retains OS download protection and reopens the app. Active work in any game blocks restart; the GUI also protects a chat draft and freezes queued work during the shutdown handoff. The installer helper never opens the workspace or Codex.
+
+- All 45 macOS tests pass (29 core and 16 subprocess tests), with formatting and strict workspace Clippy. Update regressions cover numeric version comparisons/no downgrade, stable/platform selection, origin/digest validation, truncated/corrupt/oversized downloads, archive traversal, failed replacement rollback and backup retention. A real signed harmless Mac fixture rejects executable tampering, replaces the bundle with its valid payload, keeps the original app, preserves separate workspace bytes and retains a valid code signature. All-game update readiness rejects both queued generation and a thinking guide, then succeeds when idle; unknown request fields fail validation.
+- Optimized packages, native Update interaction and Windows compilation are pending at this checkpoint. Earlier public releases remain unchanged; versions before 0.1.2 use the old manual-download button.
+
 ## Update button check after the local idle fix
 
 Verified on 2026-10-03 in the rebuilt local Mac app. Clicking **Update** displayed the installed version and opened Safari at the stable `/releases/latest` URL, which resolved to the published `v0.1.1` release. The browser displayed its Latest marker and both installer assets. Unauthenticated HEAD requests to the stable macOS DMG and Windows Setup.exe download URLs followed redirects and returned HTTP 200 with binary content types. No installation or release publication was performed. Update currently opens the release page for manual download/installation; it does not compare versions or install updates automatically. The local idle fix remains newer than the published installers. Native Windows button interaction was not tested.

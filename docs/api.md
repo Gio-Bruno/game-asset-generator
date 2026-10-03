@@ -20,6 +20,7 @@ Match errors using `code`; messages are human-facing. Malformed request envelope
 | Method | Params | Result | Retry behavior |
 | --- | --- | --- | --- |
 | `system/info` | `{}` | API version, app version, data directory, transport and capabilities | Safe |
+| `system/update/ready` | `{}` | `{isReady: true}` or `WORKSPACE_BUSY` if any game has active jobs or Forge sessions | Safe; read-only readiness check |
 | `styles/presets/list` | `{}` | Finite array of six `StylePreset` values | Safe |
 | `assistant/message` | `AssistantInput` | `AssistantSession` immediately | Idempotent by `requestId` |
 | `assistant/get` | `{id}` | `AssistantSession` | Safe |

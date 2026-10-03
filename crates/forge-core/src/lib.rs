@@ -8,4 +8,5 @@ pub mod presets;
 mod prompt;
 mod service;
 mod store;
+pub mod updates;
 pub use service::{Service, default_data_dir, default_export_dir};

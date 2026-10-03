@@ -189,6 +189,43 @@ impl Store {
             .collect()
     }
 
+    pub fn ensure_update_ready(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let mut jobs = conn
+            .prepare("SELECT data FROM jobs")
+            .map_err(ApiError::storage)?;
+        for row in jobs
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(ApiError::storage)?
+        {
+            let job: Job = serde_json::from_str(&row.map_err(ApiError::storage)?)
+                .map_err(ApiError::storage)?;
+            if !job.status.is_terminal() {
+                return Err(ApiError::new(
+                    "WORKSPACE_BUSY",
+                    "Finish or stop generation in all games before installing an update.",
+                ));
+            }
+        }
+        let mut guides = conn
+            .prepare("SELECT data FROM entities WHERE kind='assistant'")
+            .map_err(ApiError::storage)?;
+        for row in guides
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(ApiError::storage)?
+        {
+            let guide: AssistantSession = serde_json::from_str(&row.map_err(ApiError::storage)?)
+                .map_err(ApiError::storage)?;
+            if guide.status == AssistantStatus::Thinking {
+                return Err(ApiError::new(
+                    "WORKSPACE_BUSY",
+                    "Finish or stop Forge in all games before installing an update.",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub fn delete_item(&self, deletion: &Deletion) -> Result<()> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction().map_err(ApiError::storage)?;

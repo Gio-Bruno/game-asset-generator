@@ -17,7 +17,7 @@ Get the [latest release](https://github.com/Gio-Bruno/game-asset-generator/relea
 
 On macOS, open the DMG and drag **Asset Forge** into **Applications**. On Windows, run Setup.exe; it installs for your user and adds a Start menu shortcut. The published Windows cross-build links its C runtime statically and needs no separate Visual C++ runtime installation. These first release packages do not have public distribution signatures; the Mac app uses a local ad hoc signature and is not notarized.
 
-Choose **Update** in the app to open the latest release, then download its installer. Close Asset Forge before installing an update. Your projects and generated assets are stored separately from the application.
+Choose **Update** to check for and download a newer stable release. When it is ready, choose **Restart & install**: Asset Forge closes, installs the verified update and reopens. Finish any generation and send or clear your chat draft first. Your projects and Codex login are preserved. The operating system may still request approval for unsigned or unnotarized packages. Versions before 0.1.2 open the release page and require a manual installer download once.
 
 On macOS, open `dist/Asset Forge.app`. The portable CLI is `dist/asset-forge`. On Windows, extract `dist/Asset-Forge-Windows.zip` and open `asset-forge-studio.exe`; `asset-forge.exe` is the CLI.
 

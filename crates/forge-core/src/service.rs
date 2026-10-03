@@ -145,6 +145,11 @@ impl Service {
                     }
                     encode(session)
                 }
+                "system/update/ready" => {
+                    let _: EmptyInput = decode(params)?;
+                    self.store.ensure_update_ready()?;
+                    Ok(json!({"isReady":true}))
+                }
                 "system/info" => Ok(
                     json!({"apiVersion":1,"version":env!("CARGO_PKG_VERSION"),"dataDir":self.store.root,"transport":"stdio","capabilities":["2D","STYLE_REFERENCES","CHARACTER_REFERENCES","PNG_EXPORT","CANCELLATION","STYLE_PRESETS","AI_GUIDE","SPRITE_ANIMATION","ANIMATION_ZIP_EXPORT"]}),
                 ),
@@ -892,6 +897,9 @@ fn encode<T: Serialize>(value: T) -> Result<Value> {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct EmptyInput {}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct IdInput {
     id: String,
 }
@@ -1340,6 +1348,14 @@ mod management_tests {
         let (mut job, _) = service.store.claim_job(request).unwrap();
         assert_eq!(
             service
+                .dispatch("system/update/ready", json!({}))
+                .await
+                .unwrap_err()
+                .code,
+            "WORKSPACE_BUSY"
+        );
+        assert_eq!(
+            service
                 .dispatch("projects/delete", json!({"id":game["id"]}))
                 .await
                 .unwrap_err()
@@ -1353,6 +1369,14 @@ mod management_tests {
             .store
             .put("assistant", &session.id, game["id"].as_str(), &session)
             .unwrap();
+        assert_eq!(
+            service
+                .dispatch("system/update/ready", json!({}))
+                .await
+                .unwrap_err()
+                .code,
+            "WORKSPACE_BUSY"
+        );
         assert_eq!(
             service
                 .dispatch("projects/delete", json!({"id":game["id"]}))
@@ -1372,6 +1396,21 @@ mod management_tests {
             .store
             .put("assistant", &session.id, game["id"].as_str(), &session)
             .unwrap();
+        assert_eq!(
+            service
+                .dispatch("system/update/ready", json!({}))
+                .await
+                .unwrap()["isReady"],
+            true
+        );
+        assert_eq!(
+            service
+                .dispatch("system/update/ready", json!({"projectId":game["id"]}))
+                .await
+                .unwrap_err()
+                .code,
+            "VALIDATION_ERROR"
+        );
         service
             .dispatch("projects/delete", json!({"id":game["id"]}))
             .await

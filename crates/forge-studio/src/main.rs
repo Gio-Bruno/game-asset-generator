@@ -1,7 +1,6 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod ui;
-const RELEASE_PAGE: &str = "https://github.com/Gio-Bruno/game-asset-generator/releases/latest";
 use forge_core::{Service, contract::Event, default_data_dir, error::Result};
 use gpui::*;
 use gpui_component::{Root, Theme, ThemeMode};
@@ -60,13 +59,33 @@ fn main() {
                     }
                 }
             });
+            let mut installing_update = false;
             while let Some(command) = inbox.recv().await {
                 if command.method == "system/shutdown" {
                     break;
                 }
+                if command.method == "system/update/cancel" {
+                    installing_update = false;
+                    continue;
+                }
+                if installing_update {
+                    let _ = outbox.send(Response::Reply(
+                        command.method,
+                        command.params,
+                        Err(forge_core::error::ApiError::new(
+                            "APP_UPDATING",
+                            "Asset Forge is restarting to install an update.",
+                        )),
+                    ));
+                    continue;
+                }
                 let result = service
                     .dispatch(&command.method, command.params.clone())
                     .await;
+                if command.method == "system/update/ready" && result.is_ok() {
+                    // Freeze subsequent UI commands until quit, or resume if launching fails.
+                    installing_update = true;
+                }
                 let _ = outbox.send(Response::Reply(command.method, command.params, result));
             }
         });

@@ -27,6 +27,14 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Commands {
+    /// Internal restart/install helper; runs outside the application folder.
+    #[command(hide = true)]
+    ApplyUpdate {
+        #[arg(long)]
+        plan: PathBuf,
+        #[arg(long, hide = true)]
+        no_relaunch: bool,
+    },
     /// Start the newline-delimited JSON API on stdin/stdout.
     Serve,
     /// Call any v1 API method with a JSON params object.
@@ -64,9 +72,14 @@ async fn main() {
     }
 }
 async fn run(cli: Cli) -> Result<()> {
+    // No workspace lease, Codex startup or data access in the detached installer.
+    if let Commands::ApplyUpdate { plan, no_relaunch } = &cli.command {
+        return forge_core::updates::apply_update(plan, !no_relaunch);
+    }
     let root = cli.data_dir.unwrap_or_else(default_data_dir);
     let service = Service::open(root)?;
     match cli.command {
+        Commands::ApplyUpdate { .. } => unreachable!("Handled before workspace startup"),
         Commands::Serve => serve(service).await,
         Commands::Call { method, params } => {
             let params =

@@ -1,5 +1,6 @@
 use crate::{Command, Response};
 use forge_core::contract::{Animation, Asset};
+use forge_core::updates::{self, CheckResult, PreparedUpdate, Progress};
 use forge_core::{contract::*, error::Result};
 use gpui::prelude::*;
 use gpui::*;
@@ -82,6 +83,10 @@ pub struct Studio {
     playing: bool,
     play_started: Instant,
     frame_index: usize,
+    update_label: String,
+    update_busy: bool,
+    update_inbox: Option<Receiver<Progress>>,
+    ready_update: Option<PreparedUpdate>,
 }
 
 fn label(text: impl Into<SharedString>) -> Div {
@@ -150,7 +155,16 @@ impl Studio {
             playing: true,
             play_started: Instant::now(),
             frame_index: 0,
+            update_label: "Update".into(),
+            update_busy: false,
+            update_inbox: None,
+            ready_update: None,
         };
+        let mut studio = studio;
+        if let Some((message, error)) = updates::take_install_result() {
+            studio.status = message;
+            studio.is_error = error;
+        }
         studio.send("projects/list", json!({"pageSize":100}));
         studio.send("account/read", json!({}));
         cx.spawn_in(window, async move |entity, cx| {
@@ -192,6 +206,53 @@ impl Studio {
     }
     fn rendering(&self) -> bool {
         !self.active_jobs.is_empty() || self.job.as_ref().is_some_and(|j| !j.status.is_terminal())
+    }
+    fn update_application(&mut self, cx: &mut Context<Self>) {
+        if self.update_busy {
+            return;
+        }
+        if self.rendering() || self.guide_busy() || self.management_busy || self.renaming {
+            self.message(
+                "Finish your current work before updating Asset Forge.",
+                false,
+                cx,
+            );
+            return;
+        }
+        if self.ready_update.is_some() {
+            if !self.guide_input.read(cx).value().trim().is_empty() {
+                self.message(
+                    "Send or clear your chat draft before restarting to install the update.",
+                    false,
+                    cx,
+                );
+                return;
+            }
+            self.management_busy = true;
+            self.send("system/update/ready", json!({}));
+            self.message("Preparing to restart and install the update…", false, cx);
+            return;
+        }
+        let (sender, inbox) = std::sync::mpsc::channel();
+        self.update_inbox = Some(inbox);
+        self.update_busy = true;
+        self.update_label = "Checking…".into();
+        self.message("Checking for a newer Asset Forge release…", false, cx);
+        std::thread::spawn(move || {
+            let result = std::env::current_exe()
+                .map_err(|_| {
+                    forge_core::error::ApiError::new(
+                        "UPDATE_FAILED",
+                        "Could not locate the current application.",
+                    )
+                })
+                .and_then(|exe| {
+                    updates::prepare_latest(&exe, |progress| {
+                        let _ = sender.send(progress);
+                    })
+                });
+            let _ = sender.send(Progress::Finished(result));
+        });
     }
     fn refresh(&self) {
         if let Some(id) = self.project_id() {
@@ -411,6 +472,48 @@ impl Studio {
     }
     fn receive(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mut changed = false;
+        let updates: Vec<_> = self
+            .update_inbox
+            .as_ref()
+            .map(|inbox| inbox.try_iter().collect())
+            .unwrap_or_default();
+        for update in updates {
+            changed = true;
+            match update {
+                Progress::Downloading(percent) => {
+                    self.update_label = format!("Downloading {percent}%")
+                }
+                Progress::Verifying => self.update_label = "Verifying…".into(),
+                Progress::Finished(result) => {
+                    self.update_busy = false;
+                    self.update_inbox = None;
+                    match result {
+                        Ok(CheckResult::Current { installed, latest }) => {
+                            self.update_label = "Update".into();
+                            let message = if installed == latest {
+                                format!(
+                                    "You're up to date. Asset Forge {installed} is the latest release."
+                                )
+                            } else {
+                                format!(
+                                    "No newer release is available. You have {installed}; the latest published release is {latest}."
+                                )
+                            };
+                            self.message(message, false, cx);
+                        }
+                        Ok(CheckResult::Ready(update)) => {
+                            self.message(format!("Asset Forge {} is ready. Choose Restart & install to update and reopen the app.", update.version), false, cx);
+                            self.ready_update = Some(update);
+                            self.update_label = "Restart & install".into();
+                        }
+                        Err(error) => {
+                            self.update_label = "Retry update".into();
+                            self.message(error.message, true, cx);
+                        }
+                    }
+                }
+            }
+        }
         while let Ok(response) = self.responses.try_recv() {
             changed = true;
             match response {
@@ -493,6 +596,28 @@ impl Studio {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if method == "system/update/ready" {
+            self.management_busy = false;
+            let result = result.and_then(|_| {
+                self.ready_update
+                    .as_ref()
+                    .ok_or_else(|| {
+                        forge_core::error::ApiError::new(
+                            "UPDATE_FAILED",
+                            "The prepared update is no longer available.",
+                        )
+                    })
+                    .and_then(updates::launch_installer)
+            });
+            match result {
+                Ok(()) => cx.quit(),
+                Err(error) => {
+                    self.send("system/update/cancel", json!({}));
+                    self.message(error.message, true, cx);
+                }
+            }
+            return;
+        }
         if [
             "assets/list",
             "assets/import",
@@ -2057,27 +2182,11 @@ impl Render for Studio {
                     .gap_1()
                     .child(
                         Button::new("update")
-                            .label("Update")
+                            .label(self.update_label.clone())
+                            .disabled(self.update_busy)
                             .small()
                             .ghost()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                match open::that(crate::RELEASE_PAGE) {
-                                    Ok(()) => this.message(
-                                        concat!(
-                                            "Opened the latest release. You have Asset Forge ",
-                                            env!("CARGO_PKG_VERSION"),
-                                            "."
-                                        ),
-                                        false,
-                                        cx,
-                                    ),
-                                    Err(error) => this.message(
-                                        format!("Could not open the release page: {error}"),
-                                        true,
-                                        cx,
-                                    ),
-                                }
-                            })),
+                            .on_click(cx.listener(|this, _, _, cx| this.update_application(cx))),
                     )
                     .child(
                         Button::new("account")

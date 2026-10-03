@@ -7,7 +7,11 @@ Releases are prepared and published manually. GitHub Actions and other hosted CI
 - [macOS portable ZIP](https://github.com/Gio-Bruno/game-asset-generator/releases/latest/download/Asset-Forge-macOS.zip)
 - [Windows portable ZIP](https://github.com/Gio-Bruno/game-asset-generator/releases/latest/download/Asset-Forge-Windows.zip)
 
-The app's update button opens the latest release page. Installation is explicit: quit Asset Forge, download the installer for the current platform, and replace the installed application. Workspace data and Codex authentication are stored separately from the installed program.
+From 0.1.2, **Update** checks GitHub's latest stable release and downloads a newer version in the background. **Restart & install** closes the app, installs it and reopens. No downgrade or same-version replacement is offered. Versions before 0.1.2 open the release page and need one manual installation to gain this updater. Manual installers and portable downloads remain available above.
+
+The updater uses GitHub's HTTPS release metadata and asset SHA-256 digest, verifies download size/hash and restricts redirects to GitHub's download hosts. macOS uses the portable ZIP, validates its manifest, binary hashes, bundle metadata and code signature, then copies into the existing writable app location. It keeps the previous app in a hidden `.AssetForge-previous-<update-id>.app` sibling and restores it if replacement fails. Windows runs the verified per-user NSIS installer with `/S` and the current application directory, then checks the installed CLI version. A copied CLI helper waits up to 60 seconds for the old app to exit; it never opens the game workspace. The GUI checks for active jobs and Forge sessions across every game before quitting and blocks queued work during restart. Downloads and install logs are in the OS cache under `AssetForge/updates`.
+
+Workspace data and Codex authentication are separate from the program and are preserved. Quarantine/Windows downloaded-file protection is retained. With current ad hoc/unsigned packages, the OS may require its normal security approval, and a read-only or translocated Mac app must be moved to a writable location first. Developer ID signing/notarization and Windows signing can make that part smoother; the updater does not bypass OS protections. Updates and releases remain manual user actions; no GitHub CI/CD or background polling is added.
 
 ## Distribution targets
 
