@@ -739,7 +739,12 @@ impl Service {
                         "Choose a sprite sheet in this project.",
                     ));
                 }
-                if asset.kind != AssetKind::SpriteSheet {
+                // Imported images default to CHARACTER, including real sprite
+                // sheets. Only explicit boards and known generated static art
+                // have authoritative metadata that rules out extraction.
+                if asset.kind == AssetKind::ConceptSheet
+                    || (asset.job_id.is_some() && asset.kind != AssetKind::SpriteSheet)
+                {
                     return Err(ApiError::validation(
                         "Choose an existing sprite sheet for frame extraction. Use generate_animation to animate a static reference or concept sheet.",
                     ));
@@ -1125,7 +1130,7 @@ fn tool_specs() -> Vec<Value> {
         json!({"type":"function","name":"update_subject","description":"Edit the saved name, visual identity or category of a subject in the current project. Null leaves a field unchanged; all pinned images and style references are preserved. This changes text identity, not existing images.","inputSchema":schema(json!({"id":string,"name":optional_string,"description":optional_string,"kind":{"type":["string","null"],"enum":["CHARACTER","STRUCTURE","PROP","SCENE",null]}}),vec!["id","name","description","kind"])}),
         json!({"type":"function","name":"pin_reference","description":"Pin an existing image in this project as a saved subject reference (character, structure or prop), or as a style reference if characterId is null.","inputSchema":schema(json!({"assetId":string,"characterId":optional_string}),vec!["assetId","characterId"])}),
         json!({"type":"function","name":"generate_animation","description":"Generate one transparent sprite animation from the saved character and style. Shares the one-generation-request allowance; each animation contains only its saved subject. Null overrides use motion and style defaults. Returns a queued clip tracked by the app.","inputSchema":schema(json!({"characterId":string,"motion":motion,"name":optional_string,"prompt":string,"frameCount":optional_integer,"columns":optional_integer,"frameSize":optional_integer,"fps":optional_integer,"isLooping":{"type":["boolean","null"]}}),vec!["characterId","motion","name","prompt","frameCount","columns","frameSize","fps","isLooping"])}),
-        json!({"type":"function","name":"setup_animation","description":"Extract the whole existing SPRITE_SHEET using its actual source grid in this project. No image generation. Infer cell dimensions from image dimensions and pose layout, not style defaults. Specify exact row-major grid, cell dimensions, margin, spacing and timing. Extraction does not create different motion poses.","inputSchema":schema(json!({"assetId":string,"characterId":optional_string,"config":config_schema}),vec!["assetId","characterId","config"])}),
+        json!({"type":"function","name":"setup_animation","description":"Extract the whole existing sprite sheet, including imported sheets, using its actual source grid in this project. No image generation. Inspect imported pixels for sequential poses; their default kind may be CHARACTER. Infer cell dimensions from image dimensions and pose layout, not style defaults. Specify exact row-major grid, cell dimensions, margin, spacing and timing. Extraction does not create different motion poses.","inputSchema":schema(json!({"assetId":string,"characterId":optional_string,"config":config_schema}),vec!["assetId","characterId","config"])}),
         json!({"type":"function","name":"set_animation_timing","description":"Set the FPS and looping of a completed animation in this project, without generating images.","inputSchema":schema(json!({"id":string,"fps":{"type":"integer"},"isLooping":{"type":"boolean"}}),vec!["id","fps","isLooping"])}),
         json!({"type":"function","name":"align_animation","description":"Align planted feet in a completed standing IDLE clip. Creates a new clip and atlas while preserving the original; no image generation. Requires correct full grid and transparent padding. Does not repair cut art or create new motion poses.","inputSchema":schema(json!({"id":string}),vec!["id"])}),
         json!({"type":"function","name":"generate_subject_assets","description":"Render 2–12 requested subjects as separate named images, one file per subject. Use for a cast, a set of structures, or separating a concept sheet into production assets. Never combine subjects in one image. Each subject ID must belong to the current game and appear once. Queues one batch, sharing the one-generation-request allowance. Null sizes use style defaults.","inputSchema":schema(json!({"items":{"type":"array","minItems":2,"maxItems":12,"items":schema(json!({"characterId":string,"prompt":string,"width":optional_integer,"height":optional_integer}),vec!["characterId","prompt","width","height"])},"referenceAssetIds":{"type":"array","items":{"type":"string"},"maxItems":8}}),vec!["items","referenceAssetIds"])}),
@@ -1223,8 +1228,23 @@ mod animation_setup_tests {
         let reference = service.dispatch("assets/import", json!({
             "projectId":project["id"], "path":source, "name":"Static reference", "kind":"CHARACTER"
         })).await.unwrap();
-        call["callId"] = json!("static-reference");
+        // Native imports omit kind, so a correctly gridded imported sheet must
+        // remain extractable even when its metadata defaults to CHARACTER.
+        call["callId"] = json!("imported-grid");
         call["arguments"]["assetId"] = reference["id"].clone();
+        service.guide_tool(&mut session, &call).await.unwrap();
+        let mut generated: Asset = decode(reference).unwrap();
+        generated.job_id = Some("static-render".into());
+        service
+            .store
+            .put(
+                "asset",
+                &generated.id,
+                Some(&generated.project_id),
+                &generated,
+            )
+            .unwrap();
+        call["callId"] = json!("static-reference");
         assert_eq!(
             service
                 .guide_tool(&mut session, &call)
