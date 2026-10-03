@@ -1,5 +1,15 @@
 # Current verification
 
+## Woodland idle repair after v0.1.1
+
+Diagnosed on 2026-10-03 from the native app and persisted frames. Three legacy `Idle` entries incorrectly extracted 256 × 256 rectangles from the upper quarter of a 1536 × 1024 walk atlas whose actual cells were 512 × 512. The native preview displayed pieces of Mira instead of complete idle poses.
+
+- The chat now rejects obvious source/grid mismatches and static-image extraction; its instructions distinguish source cell dimensions from generation defaults and require new poses for a different motion. Regression checks cover correct full-sheet extraction, exact replay and deliberately selected subregions through the direct API.
+- One real Codex request generated a genuine six-frame standing Mira idle using the saved original identity and Woodland style. Whole-character visual inspection and transparency/bounds checks passed, but the render initially displaced the bottom row upward by 10 pixels.
+- Standing idle normalization now aligns the lower silhouette and foot baseline. An idempotent `animations/align` API/chat action also creates an aligned atlas/clip from an existing valid idle without generating images or changing its source. Tests cover source preservation, replay, frame/atlas export agreement and preservation of jump motion.
+- The aligned Mira frames all share a bottom bound of 247 in their 256-pixel cells. A valid ZIP contains the atlas, six frames, GIF and JSON. After a SQLite backup, the API imported this aligned atlas into the existing Woodland demo, created `Mira Idle`, and recoverably removed exactly the three broken idle clips. The project style, Mira identity/references, original images and walk clips were preserved.
+- All 40 macOS tests pass (24 core and 16 subprocess integration tests), along with formatting and strict workspace Clippy. Native verification of the replacement and the rebuilt local app remains pending at this checkpoint. Published v0.1.1 installers are unchanged.
+
 ## Animation QA after v0.1.1
 
 Tested on 2026-10-03 with the real Codex app-server, Forge chat and Gravebound Raider's individual PNG. The Mac was locked and the running app held the default workspace lease, so the test used a separate local workspace seeded through the API with the existing game's style, subject description and original image. No existing game data was changed. Native playback controls and Windows interaction were not exercised.

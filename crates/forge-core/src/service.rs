@@ -764,6 +764,27 @@ impl Service {
         Ok(())
     }
 
+    pub(crate) fn save_animation_atlas(
+        &self,
+        project: &str,
+        character: Option<&str>,
+        name: &str,
+        data: &[u8],
+    ) -> Result<Asset> {
+        self.save_asset(
+            NewAsset {
+                project,
+                character,
+                name,
+                job: None,
+                kind: AssetKind::SpriteSheet,
+            },
+            data,
+            None,
+            false,
+        )
+    }
+
     fn save_asset(
         &self,
         input: NewAsset<'_>,

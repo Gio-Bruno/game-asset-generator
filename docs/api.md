@@ -55,6 +55,7 @@ Match errors using `code`; messages are human-facing. Malformed request envelope
 | `animations/list` | Pagination + optional `projectId` | `Page<Animation>` | Safe |
 | `animations/setup` | `SetupAnimation` | Completed `Animation` | Idempotent per project and setup key |
 | `animations/timing/update` | `{id, fps, isLooping}` | Updated `Animation` | Same timing values can be reapplied |
+| `animations/align` | `{id, idempotencyKey}` | New aligned `Animation` and atlas | Idempotent; original preserved; no generation |
 | `animations/export` | `{id, path}` | `{animationId, path}` | Creates a ZIP; existing target fails |
 | `jobs/create` | `GenerateInput` | `Job` immediately | Idempotent per project and key |
 | `jobs/get` | `{id}` | `Job` | Safe |
@@ -149,6 +150,12 @@ Bounds: 2–16 frames, 1–8 columns (no more than frame count), cell dimensions
 `Animation`: `{id, projectId, characterId, jobId, sourceAssetId, config, status, frames, previewPath, error, createdAt}`. Optional IDs and preview/error may be null. Each frame contains `{index, path, rect: {x,y,w,h}}`. Generated clip ID equals its job ID; `jobs/cancel` cancels its generation. Status and error follow the job, including `UNKNOWN` recovery. Generation retries replay one job; timing edits change the clip, leaving the original generation snapshot intact.
 
 `SetupAnimation`: `{projectId, assetId, characterId?, idempotencyKey, config}`. Extracts a grid from an existing same-project image, validates cell bounds and nonempty frames, and creates a completed clip with `jobId: null`. It never generates new images. Identical retries return the existing clip's current state; changed payloads conflict; uncertain pending claims yield `OUTCOME_UNKNOWN`.
+
+Forge chat's `setup_animation` requires a `SPRITE_SHEET` and uses its actual source grid. It rejects a grid that leaves an entire cell's width or height unused with `ANIMATION_GRID_MISMATCH`, preventing generation defaults from cropping a larger atlas into fragments. Small trailing pixels remain supported. Direct `animations/setup` callers can deliberately select a subregion. Frame extraction preserves existing poses; a walk sheet cannot become an idle cycle without generating new motion poses.
+
+Generated `IDLE` sheets align their planted feet/base after normalization: the bottom tenth of the visible silhouette defines the horizontal anchor, and its bottom defines the baseline. Frames translate to the median anchors without scaling or redrawing pixels. Other motions retain their original positions, including a jump's vertical arc. This is intended for standing idles; hovering or translating motion should use `CUSTOM`.
+
+`animations/align` applies that same alignment to an existing completed `IDLE` clip, creating a new immutable atlas and clip while preserving the original. It requires an exact complete source grid with zero margin/spacing. It refuses cut art and fails with `ANIMATION_ALIGNMENT_UNAVAILABLE` if translation would clip visible pixels. The new atlas, frame PNGs, GIF and exported rectangles agree. Forge chat exposes this as `align_animation`; no image generation or subscription capacity is used. Alignment fixes translation drift, not inconsistent poses or scale.
 
 `animations/export` creates a ZIP containing `atlas.png`, `frames/frame-000.png` etc., `preview.gif`, and `animation.json`. JSON uses Aseprite-style frame rectangles, source sizes, durations in milliseconds, frame tags, FPS and loop metadata. Coordinates are in atlas pixels; default pivot is normalized `(0.5, 1.0)`. These are portable files rather than an engine-specific importer. PNGs carry full RGBA; GIF uses a limited palette and centisecond timing. The native preview uses PNG frames at the saved FPS.
 

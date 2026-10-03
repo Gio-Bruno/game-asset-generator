@@ -395,6 +395,7 @@ impl Service {
             "generate_animation",
             "setup_animation",
             "set_animation_timing",
+            "align_animation",
         ]
         .contains(&tool)
         {
@@ -446,6 +447,7 @@ impl Service {
                     "generate_animation" => "Started your sprite animation.",
                     "setup_animation" => "Set up frames from your sprite sheet.",
                     "set_animation_timing" => "Updated animation playback timing.",
+                    "align_animation" => "Aligned the idle's planted feet.",
                     _ => "Updated your workspace.",
                 },
             );
@@ -728,10 +730,38 @@ impl Service {
             }
             "setup_animation" => {
                 let p: GuideSetup = decode(args)?;
+                p.config.validate()?;
+                let project = current_project(session)?;
+                let asset: Asset = self.store.get("asset", &p.asset_id)?;
+                if asset.project_id != project {
+                    return Err(ApiError::new(
+                        "ACTION_DENIED",
+                        "Choose a sprite sheet in this project.",
+                    ));
+                }
+                if asset.kind != AssetKind::SpriteSheet {
+                    return Err(ApiError::validation(
+                        "Choose an existing sprite sheet for frame extraction. Use generate_animation to animate a static reference or concept sheet.",
+                    ));
+                }
+                let (width, height) = p.config.atlas_size();
+                if width > asset.width
+                    || height > asset.height
+                    || asset.width - width >= p.config.frame_width + p.config.spacing
+                    || asset.height - height >= p.config.frame_height + p.config.spacing
+                {
+                    return Err(ApiError::new(
+                        "ANIMATION_GRID_MISMATCH",
+                        format!(
+                            "This grid covers {} × {} of a {} × {} sheet. Infer the source cell dimensions from the actual image and its grid, not the project's generation defaults. Full source poses must fit in each cell; extracting frames cannot change a walk into an idle animation.",
+                            width, height, asset.width, asset.height
+                        ),
+                    ));
+                }
                 self.dispatch(
                     "animations/setup",
                     json!(SetupAnimation {
-                        project_id: current_project(session)?.into(),
+                        project_id: project.into(),
                         asset_id: p.asset_id,
                         character_id: p.character_id,
                         idempotency_key: format!("guide:{digest}"),
@@ -750,6 +780,21 @@ impl Service {
                     ));
                 }
                 self.dispatch("animations/timing/update", json!(p)).await
+            }
+            "align_animation" => {
+                let p: GuideClipId = decode(args)?;
+                let clip = self.animation(&p.id)?;
+                if clip.project_id != current_project(session)? {
+                    return Err(ApiError::new(
+                        "ACTION_DENIED",
+                        "Choose an animation in this project.",
+                    ));
+                }
+                self.dispatch(
+                    "animations/align",
+                    json!({"id":p.id,"idempotencyKey":format!("guide:{digest}")}),
+                )
+                .await
             }
             "generate_subject_assets" => {
                 let p: GuideBatch = decode(args)?;
@@ -1032,12 +1077,18 @@ struct GuideSetup {
     config: AnimationConfig,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GuideClipId {
+    id: String,
+}
+
 const GUIDE_INSTRUCTIONS: &str = concat!(
     "You are Forge, a concise, thoughtful art director inside a local 2D game asset app. Help indie developers establish a consistent style, catalog and world. First inspect the supplied workspace. Collaborate with the user instead of taking creative liberties. Before creating any new game, use ask_question with forNewGame=true to ask about one missing creative decision: visual style, mood, world theme, or which assets to start with. Offer 2–6 short, distinct choices; the app adds Skip and lets the user type an answer. Even when a genre or camera is specified, do not assume its aesthetic or theme. Ask one question at a time, at most three setup questions, and reuse details the user already gave. If everything is specified, ask which first asset they want or whether to proceed with the supplied direction. After asking, finish the turn and wait; never create, edit or generate while a question is pending. A skipped question explicitly allows defaults for that detail; don't ask it again. After a choice or skip, continue the original request and honor all prior answers. Ask a structured question for ambiguous revisions too; execute clear revisions directly. ",
     "If the user explicitly asks for a new game, use create_game to create and select a separate project even when an existing game is open. choose_style changes the current game's style and must never replace an old game when a new one was requested. create_game preserves the old game and copies only current-message attached images into the new game. Its result includes attachedReferences and referenceAssetIdMap: use the returned new IDs for subsequent tool calls; old IDs belong to the old game. Generation already inherits copied attachments, so referenceAssetIds can be empty unless adding other images. If setting up the current game, choose a suitable preset, create its project if needed and save the initial reusable subjects yourself. Save every named character, tower, building, defense or item with create_subject: kind CHARACTER for characters, STRUCTURE for towers and buildings, PROP for objects, SCENE for reusable environments. A tower-defense game needs saved structures, not an invented hero. Reuse an existing matching catalog subject; use update_subject to edit its description or classification instead of duplicating it. Never merely describe requested identities as created: they must be saved by a successful app tool. ",
     "If they request their own palette, visual language, camera or lighting, use customize_style to save those changes, preserving their current references. Every character, structure, prop and environment needs its own named production asset, linked to its saved identity. If they ask for several assets, save each subject then call generate_subject_assets once with one item per requested subject (2–12); it renders separate files, never a collage. If they ask for one asset, call generate_asset once with that subject id. Structures and props use PROP; environments use SCENE. Render sprites, objects and structures alone on transparency. Create a CONCEPT_SHEET only when the user explicitly asks for a concept sheet or mood board, with characterId=null; label it as a reference and explain that production assets are separate. Never substitute a concept sheet for a request for usable assets. When asked to separate an existing concept sheet, use it as a reference for a batch, preserving each named design and rendering one isolated subject per file. Do not pretend that saving text identities creates separate image files. ",
     "Current-message attachedReferences are visual revision targets. Inspect their pixels and preserve their identity and saved style except for requested changes. The app automatically passes these images to generation. Attachments and generation permission apply only to the current user message, never historical requests. ",
-    "For sprite motion or animation requests, use generate_animation instead, with a saved subject and preset timing. For existing sprite sheets, setup_animation extracts the specified grid without using image generation. Use set_animation_timing for playback edits. Defaults are six frames in three columns, at eight FPS, with cell size chosen from the saved style; run uses twelve FPS and jump/attack play once. Never claim exact motion quality before the user previews it. ",
+    "For sprite motion or animation requests, use generate_animation instead, with a saved subject and preset timing. For existing sprite sheets, setup_animation extracts the specified grid without using image generation. Infer extraction cell dimensions from the source image's actual width, height and pose layout, never from style or generation defaults. Extract the whole sheet; ask a structured question if its grid is uncertain. Never extract a static image as a sprite cycle or relabel walk poses as idle; a different motion requires newly generated poses. For an existing standing idle whose feet shift between correctly extracted frames, use align_animation; it creates a new aligned clip without generating images and preserves the original. This does not repair cut art, wrong grids or bad motion poses. Use set_animation_timing for playback edits. Generation defaults are six frames in three columns, at eight FPS, with cell size chosen from the saved style; run uses twelve FPS and jump/attack play once. Never claim exact motion quality before the user previews it. ",
     "Never generate for a request that only asks for advice. Do not use native image generation yourself; the app's generation tool owns the image job. Never use shell, filesystem, MCP, external apps, web search, or subagents. Never export files or change unrelated projects. Once a job is queued, explain briefly that it is rendering; do not poll or wait for it. Preserve existing identities and pin known successful subject images when creating variations. Do not invent asset IDs or claim an action succeeded without a successful tool result. On uncertain results, tell the user to check the workspace instead of repeating an action. Use null for animation overrides unless the user specifies them; preserve the style defaults. Keep replies under 100 words, use plain prose without Markdown syntax, and suggest one useful next step."
 );
 
@@ -1074,11 +1125,115 @@ fn tool_specs() -> Vec<Value> {
         json!({"type":"function","name":"update_subject","description":"Edit the saved name, visual identity or category of a subject in the current project. Null leaves a field unchanged; all pinned images and style references are preserved. This changes text identity, not existing images.","inputSchema":schema(json!({"id":string,"name":optional_string,"description":optional_string,"kind":{"type":["string","null"],"enum":["CHARACTER","STRUCTURE","PROP","SCENE",null]}}),vec!["id","name","description","kind"])}),
         json!({"type":"function","name":"pin_reference","description":"Pin an existing image in this project as a saved subject reference (character, structure or prop), or as a style reference if characterId is null.","inputSchema":schema(json!({"assetId":string,"characterId":optional_string}),vec!["assetId","characterId"])}),
         json!({"type":"function","name":"generate_animation","description":"Generate one transparent sprite animation from the saved character and style. Shares the one-generation-request allowance; each animation contains only its saved subject. Null overrides use motion and style defaults. Returns a queued clip tracked by the app.","inputSchema":schema(json!({"characterId":string,"motion":motion,"name":optional_string,"prompt":string,"frameCount":optional_integer,"columns":optional_integer,"frameSize":optional_integer,"fps":optional_integer,"isLooping":{"type":["boolean","null"]}}),vec!["characterId","motion","name","prompt","frameCount","columns","frameSize","fps","isLooping"])}),
-        json!({"type":"function","name":"setup_animation","description":"Extract sequential frames from an existing sprite sheet in this project. No image generation. Specify the exact row-major grid, cell dimensions, margin, spacing and timing.","inputSchema":schema(json!({"assetId":string,"characterId":optional_string,"config":config_schema}),vec!["assetId","characterId","config"])}),
+        json!({"type":"function","name":"setup_animation","description":"Extract the whole existing SPRITE_SHEET using its actual source grid in this project. No image generation. Infer cell dimensions from image dimensions and pose layout, not style defaults. Specify exact row-major grid, cell dimensions, margin, spacing and timing. Extraction does not create different motion poses.","inputSchema":schema(json!({"assetId":string,"characterId":optional_string,"config":config_schema}),vec!["assetId","characterId","config"])}),
         json!({"type":"function","name":"set_animation_timing","description":"Set the FPS and looping of a completed animation in this project, without generating images.","inputSchema":schema(json!({"id":string,"fps":{"type":"integer"},"isLooping":{"type":"boolean"}}),vec!["id","fps","isLooping"])}),
+        json!({"type":"function","name":"align_animation","description":"Align planted feet in a completed standing IDLE clip. Creates a new clip and atlas while preserving the original; no image generation. Requires correct full grid and transparent padding. Does not repair cut art or create new motion poses.","inputSchema":schema(json!({"id":string}),vec!["id"])}),
         json!({"type":"function","name":"generate_subject_assets","description":"Render 2–12 requested subjects as separate named images, one file per subject. Use for a cast, a set of structures, or separating a concept sheet into production assets. Never combine subjects in one image. Each subject ID must belong to the current game and appear once. Queues one batch, sharing the one-generation-request allowance. Null sizes use style defaults.","inputSchema":schema(json!({"items":{"type":"array","minItems":2,"maxItems":12,"items":schema(json!({"characterId":string,"prompt":string,"width":optional_integer,"height":optional_integer}),vec!["characterId","prompt","width","height"])},"referenceAssetIds":{"type":"array","items":{"type":"string"},"maxItems":8}}),vec!["items","referenceAssetIds"])}),
         json!({"type":"function","name":"generate_asset","description":"Queue one isolated subject or scene. Use generate_subject_assets for multiple requested assets. CONCEPT_SHEET is an explicitly requested reference board and requires characterId=null. At most one generation request per user message. Returns immediately; the UI tracks rendering.","inputSchema":schema(json!({"kind":{"type":"string","enum":["CHARACTER","SCENE","PROP","SPRITE_SHEET","CONCEPT_SHEET"]},"prompt":string,"characterId":optional_string,"referenceAssetIds":{"type":"array","items":{"type":"string"}},"width":{"type":["integer","null"]},"height":{"type":["integer","null"]},"transparentBackground":{"type":["boolean","null"]}}),vec!["kind","prompt","characterId","referenceAssetIds","width","height","transparentBackground"])}),
     ]
+}
+
+#[cfg(test)]
+mod animation_setup_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn guide_extraction_uses_source_cells_and_rejects_static_references() {
+        let tmp = tempfile::tempdir().unwrap();
+        let service = Service::open(tmp.path().join("data")).unwrap();
+        let project = service
+            .dispatch(
+                "projects/create",
+                json!({
+                    "name":"Woodland", "style":{"name":"Ink", "description":"Paper outlines"}
+                }),
+            )
+            .await
+            .unwrap();
+        let source = tmp.path().join("walk.png");
+        let mut pixels = image::RgbaImage::new(96, 64);
+        for y in 0..64 {
+            for x in 0..96 {
+                let index = (y / 32) * 3 + x / 32;
+                pixels.put_pixel(x, y, image::Rgba([30 + index as u8 * 30, 90, 70, 255]));
+            }
+        }
+        pixels.save(&source).unwrap();
+        let sheet = service
+            .dispatch(
+                "assets/import",
+                json!({
+                    "projectId":project["id"], "path":source, "name":"Walk", "kind":"SPRITE_SHEET"
+                }),
+            )
+            .await
+            .unwrap();
+        let mut session: AssistantSession = serde_json::from_value(json!({
+            "id":"grid-guide", "projectId":project["id"], "status":"THINKING", "setupApproved":true,
+            "messages":[], "threadId":"thread", "turnId":"turn", "allowGeneration":false,
+            "referenceAssetIds":[], "generatedJobIds":[], "turnJobCount":0, "error":null, "createdAt":0
+        })).unwrap();
+        let mut call = json!({"turnId":"turn", "callId":"bad-grid", "tool":"setup_animation", "arguments":{
+            "assetId":sheet["id"], "characterId":null,
+            "config":{"name":"Idle", "motion":"IDLE", "frameWidth":16, "frameHeight":16}
+        }});
+        assert_eq!(
+            service
+                .guide_tool(&mut session, &call)
+                .await
+                .unwrap_err()
+                .code,
+            "ANIMATION_GRID_MISMATCH"
+        );
+        assert!(
+            service
+                .dispatch("animations/list", json!({"projectId":project["id"]}))
+                .await
+                .unwrap()["data"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+
+        call["callId"] = json!("source-grid");
+        call["arguments"]["config"] =
+            json!({"name":"Walk", "motion":"WALK", "frameWidth":32, "frameHeight":32});
+        let clip = service.guide_tool(&mut session, &call).await.unwrap();
+        assert_eq!(clip["frames"].as_array().unwrap().len(), 6);
+        for (index, frame) in clip["frames"].as_array().unwrap().iter().enumerate() {
+            assert_eq!(
+                frame["rect"],
+                json!({"x":(index % 3)*32,"y":(index / 3)*32,"w":32,"h":32})
+            );
+            let pixels = image::open(frame["path"].as_str().unwrap())
+                .unwrap()
+                .to_rgba8();
+            assert_eq!(pixels.get_pixel(16, 16)[0], 30 + index as u8 * 30);
+        }
+        assert_eq!(
+            service.guide_tool(&mut session, &call).await.unwrap()["id"],
+            clip["id"]
+        );
+        // Deliberately selected subregions remain available through the direct API.
+        service.dispatch("animations/setup", json!({
+            "projectId":project["id"], "assetId":sheet["id"], "idempotencyKey":"explicit-subregion",
+            "config":{"name":"Subregion", "frameWidth":16, "frameHeight":16}
+        })).await.unwrap();
+
+        let reference = service.dispatch("assets/import", json!({
+            "projectId":project["id"], "path":source, "name":"Static reference", "kind":"CHARACTER"
+        })).await.unwrap();
+        call["callId"] = json!("static-reference");
+        call["arguments"]["assetId"] = reference["id"].clone();
+        assert_eq!(
+            service
+                .guide_tool(&mut session, &call)
+                .await
+                .unwrap_err()
+                .code,
+            "VALIDATION_ERROR"
+        );
+    }
 }
 
 #[cfg(test)]
