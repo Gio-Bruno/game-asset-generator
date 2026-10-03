@@ -126,6 +126,14 @@ fn version(value: &str) -> Result<Version> {
 fn valid_hash(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|c| c.is_ascii_hexdigit())
 }
+fn require_newer(next: &str, installed: &str) -> Result<()> {
+    if version(next)? <= version(installed)? {
+        return Err(failure(
+            "This prepared update is no longer newer than the installed app. Check for updates again.",
+        ));
+    }
+    Ok(())
+}
 fn select_offer(
     release: Release,
     installed: &str,
@@ -520,6 +528,7 @@ fn verify_mac_payload(payload: &Path, expected_version: &str) -> Result<()> {
 /// Copy the already-installed CLI out of the replacement directory before quitting.
 pub fn launch_installer(update: &PreparedUpdate) -> Result<()> {
     let plan = read_plan(&update.plan_path)?;
+    require_newer(&plan.version, env!("CARGO_PKG_VERSION"))?;
     let cli = match plan.platform {
         Platform::MacosArm64 => plan.destination.join("Contents/MacOS/asset-forge"),
         Platform::WindowsX64 => plan.destination.join("asset-forge.exe"),
@@ -799,6 +808,7 @@ fn relaunch(plan: &InstallPlan) -> Result<()> {
 /// Hidden CLI helper. Never opens or modifies the game workspace.
 pub fn apply_update(path: &Path, should_relaunch: bool) -> Result<()> {
     let plan = read_plan(path)?;
+    require_newer(&plan.version, env!("CARGO_PKG_VERSION"))?;
     if plan.parent_pid == std::process::id() {
         return Err(failure(
             "The update helper must run separately from the application.",
@@ -867,6 +877,9 @@ mod tests {
     #[test]
     fn only_newer_stable_matching_verified_releases_are_offered() {
         let p = Platform::MacosArm64;
+        assert!(require_newer("0.1.1", "0.1.2").is_err());
+        assert!(require_newer("0.1.2", "0.1.2").is_err());
+        assert!(require_newer("0.1.10", "0.1.2").is_ok());
         assert!(
             select_offer(release("0.1.1", p, b"zip"), "0.1.2", p)
                 .unwrap()
