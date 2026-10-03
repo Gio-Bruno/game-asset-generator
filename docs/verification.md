@@ -1,5 +1,19 @@
 # Current verification
 
+## Unreleased game hierarchy and creative questions
+
+Verified locally on 2026-10-03. This iteration is packaged in `dist/Asset Forge.app` for testing; the published `v0.1.0` installers and tag retain their original source.
+
+- All 32 tests pass on macOS: 20 core tests and 12 Unix subprocess integration tests. Formatting, strict workspace Clippy and the optimized workspace build pass. The local Mac app passes deep, strict signature verification.
+- Automated checks cover rename validation and style preservation; recoverable deletion of games, images and clips; dependent clip restoration; reference unpinning; persistence across restart; and refusal to delete while generation or Forge is working.
+- The guide cannot create a game before a setup question is answered or skipped. Pending questions block mutations. Tests cover selectable choices, typed answers, Skip, stale answers, replay safety, retained image attachments and the original one-image allowance.
+- Native macOS checks show games and their assets in a vertical sidebar, with the selected game's name above Library/World. Rename/Save updated both the sidebar and title and survived reopening.
+- The image confirmation's Keep it action retained the sample. Delete removed it from the list and preview; Undo restored both. Deleting the temporary game switched to Bramblewatch; Undo restored the temporary game, name and image. The temporary game was then removed again, leaving the four existing games intact.
+- A real Codex planning conversation offered six art-style pills. Selecting Crisp pixel art resumed the conversation with that choice, then displayed a separate world-theme question. Skip accepted defaults for that detail and completed the discussion. This check requested no saved game changes or image generation.
+- The updated app is open locally on Bramblewatch. Native Windows checks, full image creation/revision through this iteration's chat, clip deletion through the native UI and minimum-height layout checks remain pending. Clip deletion/restoration is covered by the backend suite.
+
+## Published v0.1.0 evidence
+
 Updated on 2026-10-03 for artifact source `17e5d33e7d49b8fc4cddbef629695669d81b20aa`. The simplified interface separates Library previews and read-only catalogs from Forge chat creation/editing. Its expanded backend suite passes 28 tests: 16 core and 12 Unix subprocess integration tests. The latest native Mac checks cover Library/World browsing, attachments, New game, restart and PNG export. Full chat creation/revision interactions and the redesigned animation controls remain untested natively.
 
 Both target packages now come from source `17e5d33`; the Windows package uses a manually built optimized x64 MSVC cross-build with static CRT. Documentation evidence is updated separately from the artifact source. The repository is public, GitHub Actions is disabled, and its workflow has been removed at the user's request. Builds and releases are manual. Earlier source `8612085` passed a Windows native startup smoke check; that historical result does not verify the current Windows interface.
@@ -20,7 +34,7 @@ Both target packages now come from source `17e5d33`; the Windows package uses a 
 | Image revisions | Native Add to chat on an image and a structure thumbnail attached references; prompt entry/removal worked; subprocess tests verify real pixels and inherited generation refs | Up to eight same-project combined references; full native revision generation not tested |
 | Distribution installers | ZIP CRC/hash checks, Mac signature/DMG checks and strict NSIS compilation pass for current source packages | Mac is ad hoc signed and not notarized; Windows installer is unsigned and execution remains unverified |
 
-## Latest automated checks
+### Automated checks for v0.1.0
 
 - 28 tests pass on macOS: 16 core tests and 12 subprocess integration tests. The executable Python fixture is Unix-only.
 - Subject tests cover saved structures and props, legacy character records, persistent categories, immutable identity snapshots, partial updates preserving references, guide action replay and denied cross-project edits.
@@ -31,7 +45,7 @@ Both target packages now come from source `17e5d33`; the Windows package uses a 
 - Both platform packages passed ZIP CRC and hash validation. The Mac app signature and DMG were checked; the Windows installer compiled with NSIS warnings treated as errors. Native Windows installation/uninstallation was not tested.
 - The public `v0.1.0` release contains both installers, both portable ZIPs and checksums. All five files were downloaded without authentication through the stable latest-release links and matched their local SHA-256 hashes.
 
-## Latest native Mac checks
+### Native Mac checks for v0.1.0
 
 - The packaged app at source `17e5d33` opened and restarted, detecting the existing real Codex Pro account.
 - Library displayed the existing game concept sheet. World showed five saved subjects: two goblin characters and three towers classified as `STRUCTURE`.
@@ -56,4 +70,4 @@ Both target packages now come from source `17e5d33`; the Windows package uses a 
 - The real guide changed Walk to 12 FPS, then 10 FPS and back to 12 FPS without generating an image. Workspace inspection showed zero image jobs in that GUI test workspace. Timing changes are retained as a chat operation.
 - An isolated fake server exercised signed-out, waiting, cancellation and connected account states. Its placeholder URL caused a browser authentication error; that test page was closed. This is not evidence of a real browser OAuth round trip. The real app still detects the existing Codex Pro account.
 
-Temporary test workspaces are separate from the developer's default workspace. The real Codex authentication store was not read, copied, modified or logged out.
+Automated tests use separate temporary workspaces. Native management checks used a disposable game and imported sample in the default workspace; that game is now removed through the recoverable deletion API. The real Codex authentication store was not read, copied, modified or logged out.

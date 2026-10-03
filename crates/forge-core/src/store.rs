@@ -55,6 +55,8 @@ impl Store {
             CREATE INDEX IF NOT EXISTS entities_project ON entities(kind, project_id);
             CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, project_id TEXT NOT NULL, intent_key TEXT NOT NULL, request_hash TEXT NOT NULL, data TEXT NOT NULL, UNIQUE(project_id, intent_key));
             CREATE TABLE IF NOT EXISTS effects(intent_key TEXT PRIMARY KEY, request_hash TEXT NOT NULL, response TEXT);").map_err(ApiError::storage)?;
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS deleted_entities(id TEXT PRIMARY KEY, group_id TEXT NOT NULL, deleted_at INTEGER NOT NULL);")
+            .map_err(ApiError::storage)?;
         let store = Self {
             root: fs::canonicalize(root).map_err(ApiError::storage)?,
             conn: Mutex::new(conn),
@@ -115,7 +117,7 @@ impl Store {
             .lock()
             .unwrap()
             .query_row(
-                "SELECT data FROM entities WHERE id=?1 AND kind=?2",
+                "SELECT data FROM entities e WHERE id=?1 AND kind=?2 AND NOT EXISTS (SELECT 1 FROM deleted_entities d WHERE d.id=e.id OR d.id=e.project_id)",
                 params![key, kind],
                 |r| r.get(0),
             )
@@ -142,12 +144,12 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let total: usize = conn
             .query_row(
-                "SELECT COUNT(*) FROM entities WHERE kind=?1 AND (?2 IS NULL OR project_id=?2)",
+                "SELECT COUNT(*) FROM entities e WHERE kind=?1 AND (?2 IS NULL OR project_id=?2) AND NOT EXISTS (SELECT 1 FROM deleted_entities d WHERE d.id=e.id OR d.id=e.project_id)",
                 params![kind, project],
                 |r| r.get(0),
             )
             .map_err(ApiError::storage)?;
-        let mut query = conn.prepare("SELECT data FROM entities WHERE kind=?1 AND (?2 IS NULL OR project_id=?2) ORDER BY rowid DESC LIMIT ?3 OFFSET ?4").map_err(ApiError::storage)?;
+        let mut query = conn.prepare("SELECT data FROM entities e WHERE kind=?1 AND (?2 IS NULL OR project_id=?2) AND NOT EXISTS (SELECT 1 FROM deleted_entities d WHERE d.id=e.id OR d.id=e.project_id) ORDER BY rowid DESC LIMIT ?3 OFFSET ?4").map_err(ApiError::storage)?;
         let rows = query
             .query_map(
                 params![kind, project, page_size, (page - 1) * page_size],
@@ -187,6 +189,152 @@ impl Store {
             .collect()
     }
 
+    pub fn delete_item(&self, deletion: &Deletion) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction().map_err(ApiError::storage)?;
+        // A running guide or render owns snapshots of these records. Finish or stop it first.
+        let jobs = {
+            let mut q = tx
+                .prepare("SELECT data FROM jobs WHERE project_id=?1")
+                .map_err(ApiError::storage)?;
+            q.query_map([&deletion.project_id], |r| r.get::<_, String>(0))
+                .map_err(ApiError::storage)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(ApiError::storage)?
+        };
+        for data in jobs {
+            let job: Job = serde_json::from_str(&data).map_err(ApiError::storage)?;
+            if !job.status.is_terminal() {
+                return Err(ApiError::new(
+                    "PROJECT_BUSY",
+                    "Finish or stop generation before deleting from this game.",
+                ));
+            }
+        }
+        let rows = {
+            let mut q = tx.prepare("SELECT id,kind,data FROM entities e WHERE project_id=?1 AND NOT EXISTS (SELECT 1 FROM deleted_entities d WHERE d.id=e.id OR d.id=e.project_id)").map_err(ApiError::storage)?;
+            q.query_map([&deletion.project_id], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(ApiError::storage)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(ApiError::storage)?
+        };
+        for (_, kind, data) in &rows {
+            if kind == "assistant" {
+                let session: AssistantSession =
+                    serde_json::from_str(data).map_err(ApiError::storage)?;
+                if session.status == AssistantStatus::Thinking {
+                    return Err(ApiError::new(
+                        "PROJECT_BUSY",
+                        "Finish or stop Forge before deleting from this game.",
+                    ));
+                }
+            }
+        }
+        if !rows
+            .iter()
+            .any(|(key, kind, _)| key == &deletion.id && kind == &deletion.kind)
+        {
+            return Err(ApiError::new("NOT_FOUND", "This item was already deleted."));
+        }
+        let mut hidden = vec![deletion.id.clone()];
+        if deletion.kind == "asset" {
+            for (key, kind, data) in rows {
+                match kind.as_str() {
+                    "animation" => {
+                        let clip: Animation =
+                            serde_json::from_str(&data).map_err(ApiError::storage)?;
+                        if clip.source_asset_id.as_ref() == Some(&deletion.id) {
+                            hidden.push(key);
+                        }
+                    }
+                    "project" => {
+                        let mut p: Project =
+                            serde_json::from_str(&data).map_err(ApiError::storage)?;
+                        p.style.reference_asset_ids.retain(|id| id != &deletion.id);
+                        tx.execute(
+                            "UPDATE entities SET data=?2 WHERE id=?1",
+                            params![key, serde_json::to_string(&p).map_err(ApiError::storage)?],
+                        )
+                        .map_err(ApiError::storage)?;
+                    }
+                    "character" => {
+                        let mut subject: Character =
+                            serde_json::from_str(&data).map_err(ApiError::storage)?;
+                        subject.reference_asset_ids.retain(|id| id != &deletion.id);
+                        tx.execute(
+                            "UPDATE entities SET data=?2 WHERE id=?1",
+                            params![
+                                key,
+                                serde_json::to_string(&subject).map_err(ApiError::storage)?
+                            ],
+                        )
+                        .map_err(ApiError::storage)?;
+                    }
+                    "assistant" => {
+                        let mut session: AssistantSession =
+                            serde_json::from_str(&data).map_err(ApiError::storage)?;
+                        session.reference_asset_ids.retain(|id| id != &deletion.id);
+                        tx.execute(
+                            "UPDATE entities SET data=?2 WHERE id=?1",
+                            params![
+                                key,
+                                serde_json::to_string(&session).map_err(ApiError::storage)?
+                            ],
+                        )
+                        .map_err(ApiError::storage)?;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for key in hidden {
+            tx.execute(
+                "INSERT INTO deleted_entities(id,group_id,deleted_at) VALUES(?1,?2,?3)",
+                params![key, deletion.id, now()],
+            )
+            .map_err(ApiError::storage)?;
+        }
+        tx.commit().map_err(ApiError::storage)
+    }
+
+    pub fn restore_item(&self, kind: &str, key: &str) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction().map_err(ApiError::storage)?;
+        let project: Option<String> = tx
+            .query_row(
+                "SELECT project_id FROM entities WHERE id=?1 AND kind=?2",
+                params![key, kind],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(ApiError::storage)?;
+        let project = project.ok_or_else(|| ApiError::new("NOT_FOUND", "Item was not found."))?;
+        if kind != "project"
+            && tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM deleted_entities WHERE id=?1)",
+                    [&project],
+                    |r| r.get::<_, bool>(0),
+                )
+                .map_err(ApiError::storage)?
+        {
+            return Err(ApiError::new(
+                "PROJECT_DELETED",
+                "Restore this game before restoring its assets.",
+            ));
+        }
+        // Only the original delete target can restore its group (e.g. atlas and dependent clips).
+        tx.execute("DELETE FROM deleted_entities WHERE group_id=?1", [key])
+            .map_err(ApiError::storage)?;
+        tx.commit().map_err(ApiError::storage)
+    }
+
     pub fn claim_job(&self, request: GenerateInput) -> Result<(Job, bool)> {
         let hash = format!(
             "{:x}",
@@ -218,7 +366,7 @@ impl Store {
         }
         let project_data: String = tx
             .query_row(
-                "SELECT data FROM entities WHERE kind='project' AND id=?1",
+                "SELECT data FROM entities WHERE kind='project' AND id=?1 AND NOT EXISTS(SELECT 1 FROM deleted_entities WHERE id=?1)",
                 [&request.project_id],
                 |r| r.get(0),
             )
@@ -229,7 +377,7 @@ impl Store {
         let character = if let Some(key) = &request.character_id {
             let data: String = tx
                 .query_row(
-                    "SELECT data FROM entities WHERE kind='character' AND id=?1",
+                    "SELECT data FROM entities WHERE kind='character' AND id=?1 AND NOT EXISTS(SELECT 1 FROM deleted_entities WHERE id=?1)",
                     [key],
                     |r| r.get(0),
                 )
@@ -261,7 +409,7 @@ impl Store {
         for key in &references {
             let owner: Option<String> = tx
                 .query_row(
-                    "SELECT project_id FROM entities WHERE kind='asset' AND id=?1",
+                    "SELECT project_id FROM entities WHERE kind='asset' AND id=?1 AND NOT EXISTS(SELECT 1 FROM deleted_entities WHERE id=?1)",
                     [key],
                     |r| r.get(0),
                 )
@@ -331,7 +479,7 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let mut q = conn
             .prepare(
-                "SELECT data FROM jobs WHERE (?1 IS NULL OR project_id=?1) ORDER BY rowid DESC",
+                "SELECT data FROM jobs j WHERE (?1 IS NULL OR project_id=?1) AND NOT EXISTS(SELECT 1 FROM deleted_entities d WHERE d.id=j.project_id) ORDER BY rowid DESC",
             )
             .map_err(ApiError::storage)?;
         let rows = q
@@ -494,6 +642,8 @@ mod tests {
             reference_asset_ids: vec![],
             generated_job_ids: vec![],
             turn_job_count: 0,
+            pending_question: None,
+            setup_approved: false,
             error: None,
             created_at: now(),
         };

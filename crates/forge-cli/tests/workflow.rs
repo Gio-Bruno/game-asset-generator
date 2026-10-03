@@ -156,6 +156,8 @@ fn guide_animation_uses_the_shared_generation_budget() {
     let mut api = Api::new("guide-animation");
     let started=api.call("assistant/message",json!({"requestId":"animate-guide","message":"Make a forest scout and a walk cycle","allowGeneration":true}));
     let id = started["result"]["id"].as_str().unwrap();
+    let question = api.wait_guide(id);
+    api.answer_setup(&question, false);
     let mut done = Value::Null;
     for _ in 0..200 {
         done = api.call("assistant/get", json!({"id":id}))["result"].clone();
@@ -209,6 +211,17 @@ fn disconnect_is_unknown_and_cancellation_interrupts() {
 }
 
 impl Api {
+    fn answer_setup(&mut self, session: &Value, skipped: bool) {
+        assert_eq!(session["status"], "READY", "{session}");
+        assert!(session["pendingQuestion"].is_object(), "{session}");
+        let input = json!({"requestId":format!("answer-{}",session["id"].as_str().unwrap()),"sessionId":session["id"],"projectId":session["projectId"],"message":"My choice","questionAnswer":{"questionId":session["pendingQuestion"]["id"],"optionId":if skipped {Value::Null} else {session["pendingQuestion"]["options"][0]["id"].clone()},"skipped":skipped}});
+        let accepted = self.call("assistant/message", input.clone());
+        assert_eq!(accepted["result"]["id"], session["id"], "{accepted}");
+        assert_eq!(
+            self.call("assistant/message", input)["result"]["id"],
+            session["id"]
+        );
+    }
     fn wait_guide(&mut self, id: &str) -> Value {
         for _ in 0..200 {
             let session = self.call("assistant/get", json!({"id":id}))["result"].clone();
@@ -227,6 +240,15 @@ fn guide_actions_are_scoped_and_replayed_without_duplicate_characters_or_images(
         let input = json!({"requestId":"setup-1","message":"Set up a woodland game and make Mira.","allowGeneration":permitted});
         let accepted = api.call("assistant/message", input.clone())["result"].clone();
         let id = accepted["id"].as_str().unwrap();
+        let question = api.wait_guide(id);
+        assert_eq!(
+            api.call("projects/list", json!({}))["result"]["data"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        api.answer_setup(&question, !permitted);
         let session = api.wait_guide(id);
         assert_eq!(session["status"], "READY", "{session}");
         let project = session["projectId"].as_str().unwrap();
@@ -342,13 +364,32 @@ fn chat_new_game_maps_explicit_revision_ids_without_repeating_creation() {
     let input = json!({"requestId":"new-game-revision-1","projectId":original_project,"message":"Create a new game using this tower, and give it a red roof","allowGeneration":true,"referenceAssetIds":[reference]});
     let accepted = api.call("assistant/message", input.clone())["result"].clone();
     let id = accepted["id"].as_str().unwrap();
+    let question = api.wait_guide(id);
+    assert_eq!(
+        api.call("projects/list", json!({}))["result"]["data"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    api.answer_setup(&question, false);
     let done = api.wait_guide(id);
     assert_eq!(done["status"], "READY", "{done}");
     let new_project = done["projectId"].clone();
     let copied = done["referenceAssetIds"][0].clone();
     assert_ne!(new_project, original_project);
     assert_ne!(copied, reference);
-    assert_eq!(done["messages"][0]["referenceAssetIds"], json!([copied]));
+    assert_eq!(done["messages"][0]["referenceAssetIds"], json!([reference]));
+    assert_eq!(
+        done["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|m| m["role"] == "USER")
+            .unwrap()["referenceAssetIds"],
+        json!([copied])
+    );
     assert_eq!(done["turnJobCount"], 1);
     let job = api.wait(done["generatedJobIds"][0].as_str().unwrap());
     assert_eq!(job["status"], "SUCCEEDED", "{job}");

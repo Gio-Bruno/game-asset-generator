@@ -4,8 +4,9 @@ use forge_core::{contract::*, error::Result};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::{
-    Disableable, Sizable,
+    Disableable, Root, Sizable, WindowExt,
     button::{Button, ButtonVariants},
+    dialog::DialogButtonProps,
     input::{Input, InputState},
 };
 use serde_json::{Value, json};
@@ -68,6 +69,10 @@ pub struct Studio {
     is_error: bool,
     guide: Option<AssistantSession>,
     guide_input: Entity<InputState>,
+    name_input: Entity<InputState>,
+    renaming: bool,
+    management_busy: bool,
+    last_deletion: Option<Deletion>,
     guide_scroll: ScrollHandle,
     guide_stream: String,
     guide_actions: Vec<String>,
@@ -131,6 +136,10 @@ impl Studio {
                     .multi_line(true)
                     .rows(3)
             }),
+            name_input: cx.new(|cx| InputState::new(window, cx).placeholder("Game name")),
+            renaming: false,
+            management_busy: false,
+            last_deletion: None,
             guide_scroll: ScrollHandle::new(),
             guide_stream: String::new(),
             guide_actions: vec![],
@@ -226,6 +235,7 @@ impl Studio {
     fn choose_project(&mut self, project: Project, cx: &mut Context<Self>) {
         let changed = self.project_id().as_deref() != Some(&project.id);
         if changed {
+            self.renaming = false;
             self.reset_library();
             if self
                 .guide
@@ -248,6 +258,7 @@ impl Studio {
         cx.notify();
     }
     fn new_game(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.renaming = false;
         self.reset_library();
         self.project = None;
         self.projects_loaded = true;
@@ -262,6 +273,81 @@ impl Studio {
             false,
             cx,
         );
+    }
+    fn confirm_delete(
+        &mut self,
+        kind: &str,
+        id: String,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let method = match kind {
+            "project" => "projects/delete",
+            "animation" => "animations/delete",
+            _ => "assets/delete",
+        };
+        let description = match kind {
+            "project" => {
+                "This removes the game and its contents from the lists. You can undo this deletion."
+            }
+            "animation" => {
+                "This removes the clip from the library. Its source image stays available. You can undo this deletion."
+            }
+            _ => {
+                "This removes the image and any clips made from it, and unpins it from saved references. You can undo removal; references can be pinned again in chat."
+            }
+        };
+        let studio = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let studio = studio.clone();
+            let on_close = studio.clone();
+            let id = id.clone();
+            dialog
+                .confirm()
+                .title(format!("Delete {name}?"))
+                .child(div().text_sm().child(description))
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("Delete")
+                        .cancel_text("Keep it"),
+                )
+                .on_ok(move |_, _, cx| {
+                    let _ = studio.update(cx, |this, cx| {
+                        this.management_busy = true;
+                        this.send(method, json!({"id":id}));
+                        cx.notify();
+                    });
+                    true
+                })
+                .on_close(move |_, _, cx| {
+                    let _ = on_close.update(cx, |_, cx| cx.notify());
+                })
+        });
+        cx.notify();
+    }
+    fn begin_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(project) = &self.project {
+            let name = project.name.clone();
+            self.name_input.update(cx, |input, cx| {
+                input.set_value(name, window, cx);
+                input.focus(window, cx);
+            });
+            self.renaming = true;
+            cx.notify();
+        }
+    }
+    fn save_name(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = self.project_id() {
+            let name = self.name_input.read(cx).value().trim().to_string();
+            if name.is_empty() {
+                self.message("Enter a game name.", true, cx);
+                return;
+            }
+            self.management_busy = true;
+            self.send("projects/update", json!({"id":id,"name":name}));
+            cx.notify();
+        }
     }
     fn clip(&self) -> Option<&Animation> {
         self.animation_id
@@ -431,8 +517,28 @@ impl Studio {
         let data = match result {
             Ok(data) => data,
             Err(error) => {
+                if error.code == "NOT_FOUND" && method == "assets/get" {
+                    if params["id"].as_str() == self.selected.as_deref() {
+                        self.selected = None;
+                        self.refresh();
+                    }
+                    return;
+                }
+                if error.code == "NOT_FOUND" && method == "animations/get" {
+                    if params["id"].as_str() == self.animation_id.as_deref() {
+                        self.animation_id = None;
+                        self.refresh();
+                    }
+                    return;
+                }
                 if method == "assistant/message" {
                     self.guide_submitting = false;
+                }
+                if method.ends_with("/delete")
+                    || method.ends_with("/restore")
+                    || method == "projects/update"
+                {
+                    self.management_busy = false;
                 }
                 self.message(error.message, true, cx);
                 return;
@@ -453,8 +559,24 @@ impl Studio {
                     }
                 }
             }
-            "projects/get" => {
+            "projects/update" | "projects/restore" | "projects/get" => {
                 if let Ok(project) = serde_json::from_value::<Project>(data) {
+                    if method != "projects/get" {
+                        self.management_busy = false;
+                        self.renaming = false;
+                        if method == "projects/restore" {
+                            self.last_deletion = None;
+                        }
+                        self.message(
+                            if method == "projects/update" {
+                                "Game renamed."
+                            } else {
+                                "Game restored."
+                            },
+                            false,
+                            cx,
+                        );
+                    }
                     if let Some(saved) = self.projects.iter_mut().find(|p| p.id == project.id) {
                         *saved = project.clone();
                     } else {
@@ -462,6 +584,65 @@ impl Studio {
                     }
                     self.choose_project(project, cx);
                 }
+            }
+            "projects/delete" | "assets/delete" | "animations/delete" => {
+                self.management_busy = false;
+                if let Ok(deletion) = serde_json::from_value::<Deletion>(data) {
+                    if deletion.kind == "project" {
+                        self.projects.retain(|p| p.id != deletion.id);
+                        if self.project_id().as_deref() == Some(&deletion.id) {
+                            self.new_game(window, cx);
+                            if let Some(project) = self.projects.first().cloned() {
+                                self.choose_project(project, cx);
+                            }
+                        }
+                    } else if self.project_id().as_deref() == Some(&deletion.project_id) {
+                        if deletion.kind == "asset" {
+                            self.assets.retain(|a| a.id != deletion.id);
+                            self.cache.remove(&deletion.id);
+                            self.references.retain(|id| id != &deletion.id);
+                            if self.selected.as_ref() == Some(&deletion.id) {
+                                self.selected = None;
+                            }
+                            let clips: Vec<_> = self
+                                .animation_cache
+                                .values()
+                                .filter(|c| c.source_asset_id.as_ref() == Some(&deletion.id))
+                                .map(|c| c.id.clone())
+                                .collect();
+                            for id in clips {
+                                self.animation_cache.remove(&id);
+                                self.animations.retain(|c| c.id != id);
+                                if self.animation_id.as_ref() == Some(&id) {
+                                    self.animation_id = None;
+                                }
+                            }
+                        } else {
+                            self.animation_cache.remove(&deletion.id);
+                            self.animations.retain(|c| c.id != deletion.id);
+                            if self.animation_id.as_ref() == Some(&deletion.id) {
+                                self.animation_id = None;
+                            }
+                        }
+                        self.asset_page = 1;
+                        self.animation_page = 1;
+                        self.refresh();
+                        self.send("projects/get", json!({"id":deletion.project_id}));
+                    }
+                    self.message(
+                        format!("Deleted {}. Undo is available below.", deletion.name),
+                        false,
+                        cx,
+                    );
+                    self.last_deletion = Some(deletion);
+                }
+                self.send("projects/list", json!({"pageSize":100}));
+            }
+            "assets/restore" | "animations/restore" => {
+                self.management_busy = false;
+                self.last_deletion = None;
+                self.refresh();
+                self.message("Asset restored.", false, cx);
             }
             "characters/list" => {
                 if let Ok(page) = serde_json::from_value::<Page<Character>>(data) {
@@ -671,6 +852,46 @@ impl Studio {
         if self.guide_busy() || text.trim().is_empty() {
             return;
         }
+        let answer = self
+            .guide
+            .as_ref()
+            .and_then(|g| g.pending_question.as_ref())
+            .map(|q| QuestionAnswer {
+                question_id: q.id.clone(),
+                option_id: None,
+                skipped: false,
+            });
+        self.send_guide_message(text, answer, cx);
+    }
+    fn answer_choice(&mut self, option_id: Option<String>, skipped: bool, cx: &mut Context<Self>) {
+        if self.guide_busy() {
+            return;
+        }
+        let Some(question) = self
+            .guide
+            .as_ref()
+            .and_then(|g| g.pending_question.as_ref())
+        else {
+            return;
+        };
+        let text = option_id
+            .as_ref()
+            .and_then(|id| question.options.iter().find(|o| &o.id == id))
+            .map(|o| o.label.clone())
+            .unwrap_or_else(|| "Skip this question and continue.".into());
+        let answer = QuestionAnswer {
+            question_id: question.id.clone(),
+            option_id,
+            skipped,
+        };
+        self.send_guide_message(text, Some(answer), cx);
+    }
+    fn send_guide_message(
+        &mut self,
+        text: String,
+        answer: Option<QuestionAnswer>,
+        cx: &mut Context<Self>,
+    ) {
         self.guide_stream.clear();
         self.guide_actions.clear();
         self.guide_submitting = true;
@@ -689,6 +910,7 @@ impl Studio {
                 "message":text,
                 "allowGeneration":true,
                 "referenceAssetIds":self.references,
+                "questionAnswer":answer,
             }),
         );
         self.refresh();
@@ -837,6 +1059,309 @@ impl Studio {
         }
         self.refresh();
         cx.notify();
+    }
+    fn sidebar(&self, cx: &mut Context<Self>) -> Div {
+        let busy = self.guide_busy() || self.management_busy;
+        let mut games = div()
+            .id("game-list")
+            .max_h(px(190.))
+            .min_h(px(40.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap_1();
+        for project in &self.projects {
+            let active = self.project_id().as_deref() == Some(&project.id);
+            let selected = project.clone();
+            let deleted = project.clone();
+            games = games.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .rounded_md()
+                    .when(active, |d| d.bg(rgb(0xe3e9de)))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("game-{}", project.id)))
+                            .flex_1()
+                            .min_w_0()
+                            .px_2()
+                            .py_2()
+                            .cursor_pointer()
+                            .child(div().text_sm().truncate().child(project.name.clone()))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if !this.guide_busy() && !this.management_busy {
+                                    this.choose_project(selected.clone(), cx);
+                                }
+                            })),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("delete-game-{}", project.id)))
+                            .label("×")
+                            .tooltip("Delete game")
+                            .xsmall()
+                            .ghost()
+                            .disabled(busy || (active && self.rendering()))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.confirm_delete(
+                                    "project",
+                                    deleted.id.clone(),
+                                    deleted.name.clone(),
+                                    window,
+                                    cx,
+                                )
+                            })),
+                    ),
+            );
+        }
+        let mut filters = div().flex().gap_1();
+        for (filter, name) in [
+            (Filter::All, "All"),
+            (Filter::Images, "Images"),
+            (Filter::Animations, "Clips"),
+        ] {
+            filters = filters.child(
+                Button::new(SharedString::from(format!("filter-{name}")))
+                    .label(name)
+                    .xsmall()
+                    .ghost()
+                    .when(self.filter == filter, |b| b.bg(rgb(0xe3e9de)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.filter = filter;
+                        cx.notify();
+                    })),
+            );
+        }
+        let mut assets = div()
+            .id("asset-list")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap_1();
+        if self.filter != Filter::Animations {
+            for asset in &self.assets {
+                let selected_id = asset.id.clone();
+                let deleted = asset.clone();
+                let active =
+                    self.animation_id.is_none() && self.selected.as_ref() == Some(&asset.id);
+                assets = assets.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .rounded_md()
+                        .when(active, |d| d.bg(rgb(0xe3e9de)))
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("image-{}", asset.id)))
+                                .flex_1()
+                                .min_w_0()
+                                .p_2()
+                                .flex()
+                                .gap_2()
+                                .items_center()
+                                .cursor_pointer()
+                                .child(
+                                    img(PathBuf::from(&asset.path))
+                                        .size(px(32.))
+                                        .object_fit(ObjectFit::Contain),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .flex()
+                                        .flex_col()
+                                        .child(div().text_xs().truncate().child(asset.name.clone()))
+                                        .child(
+                                            div().text_size(px(10.)).text_color(rgb(MUTED)).child(
+                                                format!("{} × {}", asset.width, asset.height),
+                                            ),
+                                        ),
+                                )
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.choose_asset(selected_id.clone(), cx)
+                                })),
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!("delete-image-{}", asset.id)))
+                                .label("×")
+                                .tooltip("Delete image")
+                                .xsmall()
+                                .ghost()
+                                .disabled(busy || self.rendering())
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.confirm_delete(
+                                        "asset",
+                                        deleted.id.clone(),
+                                        deleted.name.clone(),
+                                        window,
+                                        cx,
+                                    )
+                                })),
+                        ),
+                );
+            }
+        }
+        if self.filter != Filter::Images {
+            for clip in &self.animations {
+                let selected_id = clip.id.clone();
+                let deleted = clip.clone();
+                let mut thumbnail = div()
+                    .size(px(32.))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child("▶");
+                if let Some(frame) = clip.frames.first() {
+                    thumbnail = div().size(px(32.)).flex_shrink_0().child(
+                        img(PathBuf::from(&frame.path))
+                            .size_full()
+                            .object_fit(ObjectFit::Contain),
+                    );
+                }
+                assets = assets.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .rounded_md()
+                        .when(self.animation_id.as_ref() == Some(&clip.id), |d| {
+                            d.bg(rgb(0xe3e9de))
+                        })
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("clip-{}", clip.id)))
+                                .flex_1()
+                                .min_w_0()
+                                .p_2()
+                                .flex()
+                                .gap_2()
+                                .items_center()
+                                .cursor_pointer()
+                                .child(thumbnail)
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .flex()
+                                        .flex_col()
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .truncate()
+                                                .child(clip.config.name.clone()),
+                                        )
+                                        .child(
+                                            div().text_size(px(10.)).text_color(rgb(MUTED)).child(
+                                                format!(
+                                                    "{} frames · {} FPS",
+                                                    clip.frames.len(),
+                                                    clip.config.fps
+                                                ),
+                                            ),
+                                        ),
+                                )
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.choose_clip(selected_id.clone(), cx)
+                                })),
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!("delete-clip-{}", clip.id)))
+                                .label("×")
+                                .tooltip("Delete clip")
+                                .xsmall()
+                                .ghost()
+                                .disabled(busy || self.rendering())
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.confirm_delete(
+                                        "animation",
+                                        deleted.id.clone(),
+                                        deleted.config.name.clone(),
+                                        window,
+                                        cx,
+                                    )
+                                })),
+                        ),
+                );
+            }
+        }
+        if self.asset_total + self.animation_total == 0 {
+            assets = assets.child(div().p_2().text_xs().text_color(rgb(MUTED)).child(
+                if self.project.is_some() {
+                    "Your game's assets will appear here."
+                } else {
+                    "Choose a game or start one in chat."
+                },
+            ));
+        }
+        let pages = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(label(format!(
+                "{} IMAGES · {} CLIPS",
+                self.asset_total, self.animation_total
+            )))
+            .child(
+                div()
+                    .flex()
+                    .child(
+                        Button::new("prev")
+                            .label("←")
+                            .xsmall()
+                            .ghost()
+                            .disabled(!self.has_previous_page())
+                            .on_click(cx.listener(|this, _, _, cx| this.turn_page(false, cx))),
+                    )
+                    .child(
+                        Button::new("next")
+                            .label("→")
+                            .xsmall()
+                            .ghost()
+                            .disabled(!self.has_next_page())
+                            .on_click(cx.listener(|this, _, _, cx| this.turn_page(true, cx))),
+                    ),
+            );
+        div()
+            .w(px(220.))
+            .flex_shrink_0()
+            .h_full()
+            .p_3()
+            .border_r_1()
+            .border_color(rgb(LINE))
+            .bg(rgb(0xf1f2e9))
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(label("GAMES"))
+                    .child(
+                        Button::new("new-game")
+                            .label("+ New")
+                            .small()
+                            .ghost()
+                            .disabled(busy)
+                            .on_click(cx.listener(|this, _, window, cx| this.new_game(window, cx))),
+                    ),
+            )
+            .child(games)
+            .child(
+                div()
+                    .mt_2()
+                    .pt_3()
+                    .border_t_1()
+                    .border_color(rgb(LINE))
+                    .child(label("THIS GAME'S ASSETS")),
+            )
+            .child(filters)
+            .child(assets)
+            .child(pages)
     }
     fn library(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let clip = self.clip();
@@ -1005,187 +1530,6 @@ impl Studio {
                     )
                 });
         }
-        let mut filters = div().flex().gap_1();
-        for (filter, name) in [
-            (Filter::All, "All"),
-            (Filter::Images, "Images"),
-            (Filter::Animations, "Animations"),
-        ] {
-            filters = filters.child(
-                Button::new(name)
-                    .label(name)
-                    .small()
-                    .ghost()
-                    .when(self.filter == filter, |b| b.bg(rgb(0xe7ece2)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.filter = filter;
-                        cx.notify();
-                    })),
-            );
-        }
-        let library_header = div()
-            .flex()
-            .justify_between()
-            .items_center()
-            .child(filters)
-            .child(
-                div()
-                    .flex()
-                    .gap_1()
-                    .items_center()
-                    .child(label(format!(
-                        "{} IMAGES · {} CLIPS",
-                        self.asset_total, self.animation_total
-                    )))
-                    .child(
-                        Button::new("prev")
-                            .label("←")
-                            .xsmall()
-                            .ghost()
-                            .disabled(!self.has_previous_page())
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.turn_page(false, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("next")
-                            .label("→")
-                            .xsmall()
-                            .ghost()
-                            .disabled(!self.has_next_page())
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.turn_page(true, cx);
-                            })),
-                    ),
-            );
-        let mut gallery = div()
-            .id("asset-gallery")
-            .h(px(141.))
-            .flex_shrink_0()
-            .flex()
-            .gap_3()
-            .overflow_x_scroll();
-        if self.filter != Filter::Animations {
-            for asset in &self.assets {
-                let id = asset.id.clone();
-                let active = self.animation_id.is_none() && self.selected.as_ref() == Some(&id);
-                let added = self.references.contains(&id);
-                gallery = gallery.child(
-                    div()
-                        .w(px(122.))
-                        .flex_shrink_0()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            div()
-                                .id(SharedString::from(format!("image-{id}")))
-                                .h(px(83.))
-                                .rounded_md()
-                                .border_2()
-                                .border_color(rgb(if active { GREEN } else { LINE }))
-                                .bg(rgb(0xe9eae1))
-                                .overflow_hidden()
-                                .cursor_pointer()
-                                .child(
-                                    img(PathBuf::from(&asset.path))
-                                        .size_full()
-                                        .object_fit(ObjectFit::Contain),
-                                )
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.choose_asset(id.clone(), cx)
-                                })),
-                        )
-                        .child(div().text_xs().truncate().child(self.asset_name(asset)))
-                        .child({
-                            let id = asset.id.clone();
-                            Button::new(SharedString::from(format!("chat-{id}")))
-                                .label(if added {
-                                    "✓ In chat"
-                                } else {
-                                    "+ Add to chat"
-                                })
-                                .xsmall()
-                                .ghost()
-                                .disabled(added || self.guide_busy())
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.add_to_chat(id.clone(), cx)
-                                }))
-                        }),
-                );
-            }
-        }
-        if self.filter != Filter::Images {
-            for clip in &self.animations {
-                let id = clip.id.clone();
-                let active = self.animation_id.as_ref() == Some(&id);
-                let thumbnail = clip.frames.first().map(|f| f.path.clone()).or_else(|| {
-                    clip.source_asset_id
-                        .as_ref()
-                        .and_then(|id| self.cache.get(id))
-                        .map(|a| a.path.clone())
-                });
-                let mut card = div()
-                    .id(SharedString::from(format!("clip-{id}")))
-                    .h(px(83.))
-                    .rounded_md()
-                    .border_2()
-                    .border_color(rgb(if active { GREEN } else { LINE }))
-                    .bg(rgb(0xe9eae1))
-                    .overflow_hidden()
-                    .cursor_pointer()
-                    .flex()
-                    .items_center()
-                    .justify_center();
-                if let Some(path) = thumbnail {
-                    card = card.child(
-                        img(PathBuf::from(path))
-                            .size_full()
-                            .object_fit(ObjectFit::Contain),
-                    );
-                } else {
-                    card = card.child(label(if clip.status.is_terminal() {
-                        "CLIP"
-                    } else {
-                        "CREATING…"
-                    }));
-                }
-                gallery = gallery.child(
-                    div()
-                        .w(px(122.))
-                        .flex_shrink_0()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(card.on_click(
-                            cx.listener(move |this, _, _, cx| this.choose_clip(id.clone(), cx)),
-                        ))
-                        .child(
-                            div()
-                                .text_xs()
-                                .truncate()
-                                .child(format!("▶ {}", clip.config.name)),
-                        )
-                        .when_some(clip.source_asset_id.clone(), |d, source| {
-                            let added = self.references.contains(&source);
-                            d.child(
-                                Button::new(SharedString::from(format!("clip-chat-{}", clip.id)))
-                                    .label(if added {
-                                        "✓ In chat"
-                                    } else {
-                                        "+ Add to chat"
-                                    })
-                                    .xsmall()
-                                    .ghost()
-                                    .disabled(added || self.guide_busy())
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.add_to_chat(source.clone(), cx)
-                                    })),
-                            )
-                        }),
-                );
-            }
-        }
         div()
             .id("library-workspace")
             .flex_1()
@@ -1197,8 +1541,6 @@ impl Studio {
             .child(tools)
             .child(canvas)
             .when(clip.is_some(), |d| d.child(playback))
-            .child(library_header)
-            .child(gallery)
     }
     fn world(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let mut content = div()
@@ -1381,7 +1723,7 @@ impl Studio {
             .gap_4();
         if self.guide.as_ref().is_none_or(|g| g.messages.is_empty()) {
             conversation=conversation.child(div().font_family("Lora").text_size(px(28.)).child("What are we making?"))
-                .child(div().text_sm().line_height(px(23.)).text_color(rgb(MUTED)).child("Describe your game or the next change. I'll save the style, develop your subjects and create the assets."))
+                .child(div().text_sm().line_height(px(23.)).text_color(rgb(MUTED)).child("Describe your game or the next change. We'll choose its direction together, then create the assets."))
                 .child(label("TRY AN IDEA"));
             let ideas = if self.project.is_some() {
                 [
@@ -1484,6 +1826,71 @@ impl Studio {
                     )),
             );
         }
+        if let Some(question) = self
+            .guide
+            .as_ref()
+            .and_then(|g| g.pending_question.as_ref())
+        {
+            let mut choices = div().flex().flex_wrap().gap_2();
+            for option in &question.options {
+                let option_id = option.id.clone();
+                choices = choices.child(
+                    Button::new(SharedString::from(format!(
+                        "answer-{}-{}",
+                        question.id, option.id
+                    )))
+                    .label(option.label.clone())
+                    .small()
+                    .rounded_full()
+                    .bg(rgb(0xe7ece2))
+                    .disabled(self.guide_busy() || self.management_busy)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.answer_choice(Some(option_id.clone()), false, cx)
+                    })),
+                );
+            }
+            conversation = conversation.child(
+                div()
+                    .p_3()
+                    .rounded_lg()
+                    .bg(rgb(0xffffff))
+                    .border_1()
+                    .border_color(rgb(LINE))
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(label("YOUR CHOICE"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(question.prompt.clone()),
+                    )
+                    .child(choices)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(MUTED))
+                                    .child("Or type your own answer below."),
+                            )
+                            .child(
+                                Button::new("skip-question")
+                                    .label("Skip →")
+                                    .small()
+                                    .ghost()
+                                    .disabled(self.guide_busy() || self.management_busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.answer_choice(None, true, cx)
+                                    })),
+                            ),
+                    ),
+            );
+        }
         for action in &self.guide_actions {
             conversation = conversation.child(
                 div()
@@ -1529,11 +1936,11 @@ impl Studio {
             .child(conversation)
             .child(div().p_4().border_t_1().border_color(rgb(LINE)).flex().flex_col().gap_2()
                 .when(!self.references.is_empty(),|d|d.child(attachments))
-                .child(Input::new(&self.guide_input).h(px(90.)).disabled(self.guide_busy()))
+                .child(Input::new(&self.guide_input).h(px(90.)).disabled(self.guide_busy()||self.management_busy))
                 .child(div().flex().gap_2().items_center()
                     .child(Button::new("attach-image").label("+ Image").small().ghost().disabled(self.project.is_none()||self.references.len()>=8||self.guide_busy())
                         .on_click(cx.listener(|this,_,window,cx|this.attach_image(window,cx))))
-                    .child(Button::new("send").label(if self.guide_busy(){"Working…"}else{"Send to Forge →"}).primary().flex_1().disabled(!connected||self.guide_busy())
+                    .child(Button::new("send").label(if self.guide_busy(){"Working…"}else if self.guide.as_ref().is_some_and(|g|g.pending_question.is_some()) {"Send answer →"}else{"Send to Forge →"}).primary().flex_1().disabled(!connected||self.guide_busy()||self.management_busy)
                         .on_click(cx.listener(|this,_,_,cx|this.ask_guide(cx)))))
                 .when(self.guide_busy()||self.rendering(),|d|d.child(Button::new("stop").label("Stop").small().ghost().w_full()
                     .on_click(cx.listener(|this,_,_,_|{
@@ -1545,7 +1952,8 @@ impl Studio {
 }
 
 impl Render for Studio {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let dialog_layer = Root::render_dialog_layer(window, cx);
         let account_label = self
             .account
             .as_ref()
@@ -1558,9 +1966,9 @@ impl Render for Studio {
             })
             .unwrap_or_else(|| "Checking Codex…".into());
         let header = div()
-            .h(px(67.))
+            .h(px(60.))
             .flex_shrink_0()
-            .px_6()
+            .px_5()
             .border_b_1()
             .border_color(rgb(LINE))
             .flex()
@@ -1575,35 +1983,10 @@ impl Render for Studio {
                         div()
                             .font_family("Lora")
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_size(px(25.))
+                            .text_size(px(23.))
                             .child("Asset Forge"),
                     )
                     .child(label("2D WORKSHOP")),
-            )
-            .child(
-                div()
-                    .flex()
-                    .gap_1()
-                    .child(
-                        Button::new("library-view")
-                            .label("Library")
-                            .ghost()
-                            .when(self.view == View::Library, |b| b.bg(rgb(0xe7ece2)))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.view = View::Library;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("world-view")
-                            .label("World")
-                            .ghost()
-                            .when(self.view == View::World, |b| b.bg(rgb(0xe7ece2)))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.view = View::World;
-                                cx.notify();
-                            })),
-                    ),
             )
             .child(
                 div()
@@ -1656,7 +2039,7 @@ impl Render for Studio {
                     .child(
                         Button::new("refresh")
                             .label("↻")
-                            .tooltip("Refresh the library and Codex account")
+                            .tooltip("Refresh games, assets and Codex")
                             .small()
                             .ghost()
                             .on_click(cx.listener(|this, _, _, _| {
@@ -1666,60 +2049,96 @@ impl Render for Studio {
                             })),
                     ),
             );
-        let mut projects = div()
-            .id("project-picker")
-            .flex_1()
-            .min_w_0()
+        let mut game_title = div()
+            .h(px(60.))
+            .px_5()
+            .flex_shrink_0()
             .flex()
-            .gap_1()
-            .items_center()
-            .overflow_x_scroll();
-        for project in &self.projects {
-            let project = project.clone();
-            projects = projects.child(
-                Button::new(SharedString::from(project.id.clone()))
-                    .label(project.name.clone())
-                    .small()
-                    .ghost()
-                    .when(self.project_id().as_deref() == Some(&project.id), |b| {
-                        b.bg(rgb(0xe7ece2))
-                    })
-                    .disabled(self.guide_busy())
-                    .on_click(
-                        cx.listener(move |this, _, _, cx| this.choose_project(project.clone(), cx)),
-                    ),
-            );
+            .gap_2()
+            .items_center();
+        if self.renaming {
+            game_title = game_title
+                .child(
+                    Input::new(&self.name_input)
+                        .flex_1()
+                        .disabled(self.management_busy),
+                )
+                .child(
+                    Button::new("save-name")
+                        .label("Save")
+                        .small()
+                        .primary()
+                        .disabled(self.management_busy)
+                        .on_click(cx.listener(|this, _, _, cx| this.save_name(cx))),
+                )
+                .child(
+                    Button::new("cancel-name")
+                        .label("Cancel")
+                        .small()
+                        .ghost()
+                        .disabled(self.management_busy)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.renaming = false;
+                            cx.notify();
+                        })),
+                );
+        } else {
+            game_title = game_title
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .font_family("Lora")
+                        .text_size(px(25.))
+                        .truncate()
+                        .child(
+                            self.project
+                                .as_ref()
+                                .map(|p| p.name.clone())
+                                .unwrap_or_else(|| "New game".into()),
+                        ),
+                )
+                .when(self.project.is_some(), |d| {
+                    d.child(
+                        Button::new("rename-game")
+                            .label("Rename")
+                            .small()
+                            .ghost()
+                            .disabled(self.guide_busy() || self.management_busy)
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.begin_rename(window, cx)),
+                            ),
+                    )
+                });
         }
-        projects = projects.child(
-            Button::new("new-game")
-                .label("+ New game")
-                .small()
-                .ghost()
-                .disabled(self.guide_busy())
-                .on_click(cx.listener(|this, _, window, cx| this.new_game(window, cx))),
-        );
-        let projectbar = div()
-            .h(px(49.))
+        let mut tabs = div()
+            .h(px(43.))
             .px_5()
             .flex_shrink_0()
             .border_b_1()
             .border_color(rgb(LINE))
             .flex()
-            .gap_3()
             .items_center()
-            .child(projects)
-            .when_some(self.project.as_ref(), |d, p| {
-                d.child(label(format!(
-                    "{} · {} SUBJECTS",
-                    p.style.name, self.subject_total
-                )))
-            });
+            .gap_1();
+        for (view, name) in [(View::Library, "Library"), (View::World, "World")] {
+            tabs = tabs.child(
+                Button::new(name)
+                    .label(name)
+                    .small()
+                    .ghost()
+                    .when(self.view == view, |b| b.bg(rgb(0xe7ece2)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.view = view;
+                        cx.notify();
+                    })),
+            );
+        }
         let workspace = match self.view {
             View::Library => self.library(cx).into_any_element(),
             View::World => self.world(cx).into_any_element(),
         };
         let login = div()
-            .px_6()
+            .px_5()
             .py_2()
             .bg(rgb(0xe4ebdf))
             .flex()
@@ -1738,7 +2157,7 @@ impl Render for Studio {
             );
         let footer = div()
             .h(px(34.))
-            .px_6()
+            .px_5()
             .flex_shrink_0()
             .border_t_1()
             .border_color(rgb(LINE))
@@ -1752,9 +2171,30 @@ impl Render for Studio {
             } else {
                 GREEN
             })))
-            .child(div().truncate().child(self.status.clone()));
+            .child(div().flex_1().truncate().child(self.status.clone()))
+            .when_some(self.last_deletion.as_ref(), |d, deletion| {
+                let method = match deletion.kind.as_str() {
+                    "project" => "projects/restore",
+                    "animation" => "animations/restore",
+                    _ => "assets/restore",
+                };
+                let id = deletion.id.clone();
+                d.child(
+                    Button::new("undo-delete")
+                        .label("Undo deletion")
+                        .xsmall()
+                        .ghost()
+                        .disabled(self.management_busy || self.guide_busy() || self.rendering())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.management_busy = true;
+                            this.send(method, json!({"id":id}));
+                            cx.notify();
+                        })),
+                )
+            });
         div()
             .size_full()
+            .relative()
             .font_family("IBM Plex Sans")
             .text_color(rgb(INK))
             .bg(rgb(PAPER))
@@ -1767,6 +2207,7 @@ impl Render for Studio {
                     .flex()
                     .flex_1()
                     .min_h_0()
+                    .child(self.sidebar(cx))
                     .child(
                         div()
                             .flex_1()
@@ -1774,11 +2215,13 @@ impl Render for Studio {
                             .h_full()
                             .flex()
                             .flex_col()
-                            .child(projectbar)
+                            .child(game_title)
+                            .child(tabs)
                             .child(workspace),
                     )
                     .child(self.guide_panel(cx)),
             )
             .child(footer)
+            .children(dialog_layer)
     }
 }

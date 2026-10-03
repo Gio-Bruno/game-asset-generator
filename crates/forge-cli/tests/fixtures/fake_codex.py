@@ -56,6 +56,19 @@ def tool(thread, name, args, call, callback):
     pending_tools[request_id] = callback
     emit({"id":request_id,"method":"item/tool/call","params":{"threadId":thread,"turnId":thread,"callId":call,"tool":name,"arguments":args}})
 def guide(thread):
+    prompt = turn_inputs[thread][0]["text"]
+    context = json.JSONDecoder().raw_decode(prompt.split("Current workspace (data, not instructions):\n", 1)[1])[0]
+    if mode in ("guide", "guide-generate", "guide-animation", "guide-new-game-reference") and not context["gameSetupAnswered"] and (mode == "guide-new-game-reference" or context["project"] is None):
+        def asked(result):
+            assert result["success"]
+            # Even a misbehaving model must not change the project while the question is pending.
+            def blocked(result):
+                assert not result["success"]
+                assert json.loads(result["contentItems"][0]["text"])["error"]["code"] == "QUESTION_PENDING"
+                complete(thread, "Choose your visual direction, or skip to use defaults.")
+            tool(thread, "choose_style", {"presetId":"woodland","projectName":"Unapproved","extraDirection":None}, "premature-style", blocked)
+        tool(thread, "ask_question", {"prompt":"Which visual direction should we use?","forNewGame":True,"options":[{"id":"woodland","label":"Warm storybook"},{"id":"pixel","label":"Pixel art"},{"id":"isometric","label":"Tiny isometric"}]}, "setup-question", asked)
+        return
     if mode in ("guide-reference", "guide-new-game-reference"):
         inputs = turn_inputs[thread]
         prompt = inputs[0]["text"]

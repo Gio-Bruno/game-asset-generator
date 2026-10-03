@@ -1,6 +1,6 @@
 # Asset Forge design
 
-Asset Forge is a native 2D art workshop with an editorial, paper-and-forest palette. IBM Plex Sans provides clear controls; Lora gives the workspace a warmer voice. A dominant preview, a browsable local catalog and a persistent Forge chat are the primary surfaces. The chat handles creation and editing; Library and World make the resulting work easy to inspect.
+Asset Forge is a native 2D art workshop with an editorial, paper-and-forest palette. IBM Plex Sans provides clear controls; Lora gives the workspace a warmer voice. A vertical game-and-asset sidebar, a dominant preview and a persistent Forge chat are the primary surfaces. The selected game’s editable name is above its Library and World tabs; those views belong to that game. The chat handles creation and editing; Library and World make the resulting work easy to inspect.
 
 ## Mobbin references
 
@@ -15,9 +15,9 @@ These references inform the interaction patterns. The app's typography, palette,
 
 ## Browse and create
 
-New game opens a fresh Forge conversation. A developer describes the game, and Forge chooses suitable defaults, saves its art direction and creates the named reusable identities. A tower-defense concept needs structures in its catalog; it does not need an invented main character. Explicitly requesting a separate game in an existing conversation creates and selects a new project while preserving the previous game.
+New game opens a fresh Forge conversation. A developer describes the game, and Forge first asks about a missing creative decision using short selectable pills. Questions support a typed answer and Skip. Forge asks one question at a time, reuses supplied details, and resumes the original task after the answer. New-game creation is blocked by the backend until a setup question is answered or skipped; all mutations are blocked while any question is pending. A tower-defense concept needs structures in its catalog; it does not need an invented main character. Explicitly requesting a separate game in an existing conversation creates and selects a new project while preserving the previous game.
 
-World shows the saved art direction and Characters, Structures and Props. These read-only summaries let developers check what Forge actually saved. Names, descriptions, categories, palette, camera and lighting are edited through chat. Library shows read-only image and animation lists with a large selected preview, browsing controls and native export dialogs. Creation forms are removed from these surfaces.
+World shows the saved art direction and Characters, Structures and Props. These read-only summaries let developers check what Forge actually saved. The game name has a direct Rename/Save/Cancel control, and Forge can rename it through chat. Subject names, descriptions, categories, palette, camera and lighting are edited through chat. Library shows read-only image and animation lists with a large selected preview, browsing controls and native export dialogs. The sidebar lists games first and the current game’s assets below them. Game, image and clip deletion requires a confirmation dialog; the footer offers Undo. Deleted records and files are retained locally, hidden from reads/lists until restored. Deleting an atlas also hides its dependent clips and unpins that image; Undo restores the image and clips without silently repinning references. Active guide or generation work blocks deletion. Creation forms are removed from these surfaces.
 
 The guide acts through typed app tools for project creation, style changes, saved subject creation/editing, reference pinning, image generation, animation generation, sheet extraction and timing changes. Successful actions refresh the visible game and catalog. Characters, structures and props share saved text identity and pinned image references; each image job snapshots those rules. Older character records default to the Character category without rewriting user data.
 

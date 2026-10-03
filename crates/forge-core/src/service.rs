@@ -108,7 +108,10 @@ impl Service {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send + 'a>> {
         Box::pin(async move {
             match method {
-                method if method.starts_with("animations/") => {
+                method
+                    if method.starts_with("animations/")
+                        && !matches!(method, "animations/delete" | "animations/restore") =>
+                {
                     self.animation_dispatch(method, params).await
                 }
                 "styles/presets/list" => encode(crate::presets::all()),
@@ -184,6 +187,72 @@ impl Service {
                 "projects/get" => {
                     let p: IdInput = decode(params)?;
                     encode(self.store.get::<Project>("project", &p.id)?)
+                }
+                "projects/update" => {
+                    let p: RenameInput = decode(params)?;
+                    nonempty("name", &p.name, 120)?;
+                    let mut project: Project = self.store.get("project", &p.id)?;
+                    project.name = p.name.trim().into();
+                    self.store
+                        .put("project", &project.id, Some(&project.id), &project)?;
+                    encode(project)
+                }
+                "assets/update" => {
+                    let p: RenameInput = decode(params)?;
+                    nonempty("name", &p.name, 120)?;
+                    let mut asset: Asset = self.store.get("asset", &p.id)?;
+                    asset.name = p.name.trim().into();
+                    self.store
+                        .put("asset", &asset.id, Some(&asset.project_id), &asset)?;
+                    encode(asset)
+                }
+                "projects/delete" | "assets/delete" | "animations/delete" => {
+                    let p: IdInput = decode(params)?;
+                    let deletion = match method {
+                        "projects/delete" => {
+                            let item: Project = self.store.get("project", &p.id)?;
+                            Deletion {
+                                id: item.id.clone(),
+                                project_id: item.id,
+                                name: item.name,
+                                kind: "project".into(),
+                            }
+                        }
+                        "assets/delete" => {
+                            let item: Asset = self.store.get("asset", &p.id)?;
+                            Deletion {
+                                id: item.id,
+                                project_id: item.project_id,
+                                name: item.name,
+                                kind: "asset".into(),
+                            }
+                        }
+                        _ => {
+                            let item: Animation = self.store.get("animation", &p.id)?;
+                            Deletion {
+                                id: item.id,
+                                project_id: item.project_id,
+                                name: item.config.name,
+                                kind: "animation".into(),
+                            }
+                        }
+                    };
+                    self.store.delete_item(&deletion)?;
+                    encode(deletion)
+                }
+                "projects/restore" | "assets/restore" | "animations/restore" => {
+                    let p: IdInput = decode(params)?;
+                    let kind = match method {
+                        "projects/restore" => "project",
+                        "assets/restore" => "asset",
+                        _ => "animation",
+                    };
+                    self.store.restore_item(kind, &p.id)?;
+                    match kind {
+                        "project" => encode(self.store.get::<Project>(kind, &p.id)?),
+                        "asset" => encode(self.store.get::<Asset>(kind, &p.id)?),
+                        _ => encode(self.animation(&p.id)?),
+                    }
                 }
                 "projects/style/update" => {
                     let p: UpdateStyle = decode(params)?;
@@ -1006,6 +1075,264 @@ mod tests {
                 .unwrap()
                 .len(),
             3
+        );
+    }
+}
+
+#[cfg(test)]
+mod management_tests {
+    use super::*;
+
+    async fn project(service: &Service, name: &str) -> Value {
+        service
+            .dispatch(
+                "projects/create",
+                json!({"name":name,"style":{"name":"Ink","description":"Amber line art"}}),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn rename_delete_restore_keeps_files_and_scopes_game_contents() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("data");
+        let service = Service::open(&root).unwrap();
+        let game = project(&service, "Original").await;
+        let other = project(&service, "Other game").await;
+        let renamed = service
+            .dispatch(
+                "projects/update",
+                json!({"id":game["id"],"name":"  Renamed game  "}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(renamed["name"], "Renamed game");
+        assert_eq!(renamed["style"], game["style"]);
+        assert_eq!(
+            service
+                .dispatch("projects/update", json!({"id":game["id"],"name":" "}))
+                .await
+                .unwrap_err()
+                .code,
+            "VALIDATION_ERROR"
+        );
+        let png = tmp.path().join("atlas.png");
+        image::RgbaImage::from_pixel(32, 16, image::Rgba([120, 60, 30, 255]))
+            .save(&png)
+            .unwrap();
+        let asset = service
+            .dispatch(
+                "assets/import",
+                json!({"projectId":game["id"],"name":"Atlas","path":png,"kind":"SPRITE_SHEET"}),
+            )
+            .await
+            .unwrap();
+        let bytes = fs::read(asset["path"].as_str().unwrap()).unwrap();
+        let subject = service.dispatch("characters/create", json!({"projectId":game["id"],"name":"Scout","description":"Amber scarf","referenceAssetIds":[asset["id"]]})).await.unwrap();
+        let mut style = game["style"].clone();
+        style["referenceAssetIds"] = json!([asset["id"]]);
+        service
+            .dispatch(
+                "projects/style/update",
+                json!({"projectId":game["id"],"style":style}),
+            )
+            .await
+            .unwrap();
+        let clip = service.dispatch("animations/setup", json!({"projectId":game["id"],"assetId":asset["id"],"idempotencyKey":"setup","config":{"name":"Walk","motion":"WALK","frameCount":2,"columns":2,"frameWidth":16,"frameHeight":16,"fps":8,"isLooping":true,"margin":0,"spacing":0}})).await.unwrap();
+        service
+            .dispatch("assets/delete", json!({"id":asset["id"]}))
+            .await
+            .unwrap();
+        assert_eq!(
+            service
+                .dispatch("assets/get", json!({"id":asset["id"]}))
+                .await
+                .unwrap_err()
+                .code,
+            "NOT_FOUND"
+        );
+        assert_eq!(
+            service
+                .dispatch("animations/get", json!({"id":clip["id"]}))
+                .await
+                .unwrap_err()
+                .code,
+            "NOT_FOUND"
+        );
+        assert_eq!(
+            service
+                .dispatch("projects/get", json!({"id":game["id"]}))
+                .await
+                .unwrap()["style"]["referenceAssetIds"],
+            json!([])
+        );
+        assert_eq!(
+            service
+                .dispatch("characters/get", json!({"id":subject["id"]}))
+                .await
+                .unwrap()["referenceAssetIds"],
+            json!([])
+        );
+        assert_eq!(fs::read(asset["path"].as_str().unwrap()).unwrap(), bytes);
+        service
+            .dispatch("assets/restore", json!({"id":asset["id"]}))
+            .await
+            .unwrap();
+        assert_eq!(
+            service
+                .dispatch("animations/get", json!({"id":clip["id"]}))
+                .await
+                .unwrap()["frames"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        service
+            .dispatch("animations/delete", json!({"id":clip["id"]}))
+            .await
+            .unwrap();
+        assert!(
+            service
+                .dispatch("assets/get", json!({"id":asset["id"]}))
+                .await
+                .is_ok()
+        );
+        service
+            .dispatch("animations/restore", json!({"id":clip["id"]}))
+            .await
+            .unwrap();
+        service
+            .dispatch("projects/delete", json!({"id":game["id"]}))
+            .await
+            .unwrap();
+        assert_eq!(
+            service.dispatch("projects/list", json!({})).await.unwrap()["data"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            service
+                .dispatch("characters/list", json!({}))
+                .await
+                .unwrap()["data"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            service.dispatch("assets/list", json!({})).await.unwrap()["data"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            service
+                .dispatch("assets/restore", json!({"id":asset["id"]}))
+                .await
+                .unwrap_err()
+                .code,
+            "PROJECT_DELETED"
+        );
+        assert_eq!(
+            service
+                .dispatch("projects/get", json!({"id":other["id"]}))
+                .await
+                .unwrap(),
+            other
+        );
+        drop(service);
+        let service = Service::open(&root).unwrap();
+        assert_eq!(
+            service
+                .dispatch("projects/get", json!({"id":game["id"]}))
+                .await
+                .unwrap_err()
+                .code,
+            "NOT_FOUND"
+        );
+        service
+            .dispatch("projects/restore", json!({"id":game["id"]}))
+            .await
+            .unwrap();
+        assert_eq!(
+            service
+                .dispatch("projects/get", json!({"id":game["id"]}))
+                .await
+                .unwrap()["name"],
+            "Renamed game"
+        );
+        assert!(
+            service
+                .dispatch("characters/get", json!({"id":subject["id"]}))
+                .await
+                .is_ok()
+        );
+        assert!(
+            service
+                .dispatch("animations/get", json!({"id":clip["id"]}))
+                .await
+                .is_ok()
+        );
+        assert_eq!(fs::read(asset["path"].as_str().unwrap()).unwrap(), bytes);
+    }
+
+    #[tokio::test]
+    async fn active_work_blocks_deletion_without_hiding_anything() {
+        let tmp = tempfile::tempdir().unwrap();
+        let service = Service::open(tmp.path()).unwrap();
+        let game = project(&service, "Busy game").await;
+        let request: GenerateInput = serde_json::from_value(
+            json!({"projectId":game["id"],"idempotencyKey":"busy","prompt":"A tower"}),
+        )
+        .unwrap();
+        let (mut job, _) = service.store.claim_job(request).unwrap();
+        assert_eq!(
+            service
+                .dispatch("projects/delete", json!({"id":game["id"]}))
+                .await
+                .unwrap_err()
+                .code,
+            "PROJECT_BUSY"
+        );
+        job.status = JobStatus::Cancelled;
+        service.store.save_job(&job).unwrap();
+        let mut session: AssistantSession = serde_json::from_value(json!({"id":"busy-chat","projectId":game["id"],"status":"THINKING","messages":[],"threadId":null,"turnId":null,"allowGeneration":false,"generatedJobIds":[],"error":null,"createdAt":0})).unwrap();
+        service
+            .store
+            .put("assistant", &session.id, game["id"].as_str(), &session)
+            .unwrap();
+        assert_eq!(
+            service
+                .dispatch("projects/delete", json!({"id":game["id"]}))
+                .await
+                .unwrap_err()
+                .code,
+            "PROJECT_BUSY"
+        );
+        assert!(
+            service
+                .dispatch("projects/get", json!({"id":game["id"]}))
+                .await
+                .is_ok()
+        );
+        session.status = AssistantStatus::Ready;
+        service
+            .store
+            .put("assistant", &session.id, game["id"].as_str(), &session)
+            .unwrap();
+        service
+            .dispatch("projects/delete", json!({"id":game["id"]}))
+            .await
+            .unwrap();
+        assert!(
+            service.dispatch("jobs/list", json!({})).await.unwrap()["data"]
+                .as_array()
+                .unwrap()
+                .is_empty()
         );
     }
 }

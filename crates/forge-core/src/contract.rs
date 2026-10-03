@@ -36,6 +36,23 @@ pub struct CreateProject {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RenameInput {
+    pub id: String,
+    pub name: String,
+}
+
+/// Deletion hides records and keeps their files available for restoration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Deletion {
+    pub id: String,
+    pub kind: String,
+    pub project_id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Character {
     pub id: String,
@@ -471,6 +488,34 @@ pub struct AssistantInput {
     /// Visual context for this message only. Empty input preserves legacy replay hashes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reference_asset_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question_answer: Option<QuestionAnswer>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QuestionAnswer {
+    pub question_id: String,
+    #[serde(default)]
+    pub option_id: Option<String>,
+    #[serde(default)]
+    pub skipped: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QuestionOption {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantQuestion {
+    pub id: String,
+    pub prompt: String,
+    pub options: Vec<QuestionOption>,
+    pub for_new_game: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -506,6 +551,10 @@ pub struct AssistantSession {
     pub generated_job_ids: Vec<String>,
     #[serde(default)]
     pub turn_job_count: u32,
+    #[serde(default)]
+    pub pending_question: Option<AssistantQuestion>,
+    #[serde(default)]
+    pub setup_approved: bool,
     pub error: Option<ApiError>,
     pub created_at: u64,
 }
