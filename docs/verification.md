@@ -1,5 +1,16 @@
 # Current verification
 
+## Published v0.1.1 evidence
+
+Published manually on 2026-10-03 from source `ae589433842662c3f1cb226d44ca3e108940d986`, with annotated tag `v0.1.1` and the `release/0.1` branch at that source. The [public release](https://github.com/Gio-Bruno/game-asset-generator/releases/tag/v0.1.1) includes both installers, both portable ZIPs and SHA-256 checksums. The original v0.1.0 tag and artifacts are unchanged. GitHub Actions remains disabled; no CI/CD was added.
+
+- Both optimized platforms were rebuilt locally from the same committed source. Native Mac packaging verified all build/package inputs against that commit; Windows packaging verified its original build manifest, version and executable hashes.
+- All 37 macOS tests pass: 22 core and 15 Unix subprocess integration tests. Formatting and strict workspace Clippy pass. All 22 compiled Windows core tests pass under Wine; the packaged Windows CLI reports 0.1.1 and passes styles/motions, project rename, structure persistence and deletion/restoration checks in an isolated workspace.
+- The generated icon's transparent master, macOS ICNS and ten Windows ICO sizes were inspected. The Windows studio EXE has group icon ID 1 with ten byte-identical image resources and the verified GPUI DPI/common-controls manifest. The NSIS installer contains the matching icons; installer/uninstaller and shortcuts use the app icon.
+- Mac bundle icon declaration and 0.1.1 metadata, deep strict code signature and DMG checksum pass. Both ZIPs pass CRC, binary hash, source commit and icon checks. The packaged Mac CLI passes its isolated persistence smoke check.
+- All five published files were downloaded publicly without authentication and match the local SHA-256 checksums. The stable latest-release URL resolves to v0.1.1, so the existing Update button targets this release.
+- The final Mac app opened, but native automation stayed on the initial loading view and then timed out during Dock inspection. Final native visual interaction remains unverified; prior hierarchy and real separate-asset UI checks are recorded below. Native Windows UI/installer execution remains unverified. The Mac package is ad hoc signed and not notarized; Windows distribution is unsigned.
+
 ## Unreleased separate production assets
 
 Verified locally on 2026-10-03. The app can now render several requested subjects as individual production images instead of substituting a concept board. Published v0.1.0 installers are unchanged.
