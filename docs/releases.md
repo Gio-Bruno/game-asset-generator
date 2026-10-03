@@ -69,12 +69,20 @@ Every package includes the CLI, README, docs, examples, font licenses, and a rel
 The local cross-build helper downloads its tools into `target/windows-tools`, snapshots the source, and builds optimized x64 MSVC executables without GitHub Actions:
 
 ```sh
-python3 scripts/windows_cross_build.py --prepare
+python3 scripts/windows_cross_build.py --prepare --source-commit "<verified-commit>"
 # Subsequent builds reuse the downloaded tools:
-python3 scripts/windows_cross_build.py
+python3 scripts/windows_cross_build.py --source-commit "<verified-commit>"
 ```
 
-It verifies the pinned GPUI crate and its shader sources, then reuses the exact compiled shader bytes from the previously verified Windows build. Its build-only dependency patch stays in the isolated snapshot; the application's source and root Cargo manifests are unchanged. See [shader provenance](../assets/windows-shaders/README.md). Output is in `target/windows-release/x86_64-pc-windows-msvc/release`; `target/windows-release/build-provenance.json` records source and executable hashes. The helper uses a static C runtime. Before packaging, validate the binaries and use their actual source commit and hashes in the prebuilt manifest above.
+Replace `<verified-commit>` with the full commit that will identify the release. The helper verifies every copied build input against that commit before building. It verifies the pinned GPUI crate and its shader sources, then reuses the exact compiled shader bytes from the previously verified Windows build. Its build-only dependency patch stays in the isolated snapshot; the application's source and root Cargo manifests are unchanged. See [shader provenance](../assets/windows-shaders/README.md).
+
+Output is in `target/windows-release/x86_64-pc-windows-msvc/release`. `target/windows-release/build-provenance.json` records source and executable hashes, and a verified `--source-commit` automatically emits `target/windows-release/windows-prebuilt-manifest.json` for packaging. The helper uses a static C runtime. Validate the resulting binaries before packaging, then use that emitted manifest without changing its source commit or hashes:
+
+```sh
+python3 scripts/package.py --platform windows \
+  --windows-build target/windows-release/x86_64-pc-windows-msvc/release \
+  --windows-build-manifest target/windows-release/windows-prebuilt-manifest.json
+```
 
 ## Git release branches and tags
 
