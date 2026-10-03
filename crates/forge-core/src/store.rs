@@ -523,6 +523,130 @@ impl Store {
         Ok((batch, new_jobs))
     }
 
+    pub fn claim_animation_set(
+        &self,
+        input: &CreateAnimationSet,
+        requests: Vec<GenerateInput>,
+    ) -> Result<(AnimationSet, Vec<Job>)> {
+        let key = format!(
+            "animation-set:{}:{}",
+            input.project_id, input.idempotency_key
+        );
+        let hash = format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(input).map_err(ApiError::storage)?)
+        );
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(ApiError::storage)?;
+        let existing: Option<(String, String)> = tx
+            .query_row(
+                "SELECT request_hash,response FROM effects WHERE intent_key=?1",
+                [&key],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(ApiError::storage)?;
+        if let Some((previous_hash, data)) = existing {
+            if previous_hash != hash {
+                return Err(ApiError::new(
+                    "IDEMPOTENCY_CONFLICT",
+                    "This animation set key was already used with different coverage.",
+                ));
+            }
+            return Ok((
+                serde_json::from_str(&data).map_err(ApiError::storage)?,
+                vec![],
+            ));
+        }
+        let mut entries = vec![];
+        let mut new_jobs = vec![];
+        for request in requests {
+            let config = request.animation.as_ref().ok_or_else(|| {
+                ApiError::validation("Every set entry requires animation settings.")
+            })?;
+            let direction = config.direction.ok_or_else(|| {
+                ApiError::validation("Every set entry requires an explicit direction.")
+            })?;
+            let motion = serde_json::to_value(config.motion).map_err(ApiError::storage)?;
+            let facing = serde_json::to_value(direction).map_err(ApiError::storage)?;
+            // Job status is authoritative: a stale queued clip whose render failed cannot satisfy a cell.
+            let found: Option<String> = tx.query_row(
+                "SELECT e.data FROM entities e LEFT JOIN jobs j ON j.id=json_extract(e.data,'$.jobId') WHERE e.kind='animation' AND e.project_id=?1 AND json_extract(e.data,'$.characterId')=?2 AND json_extract(e.data,'$.config.motion')=?3 AND json_extract(e.data,'$.config.direction')=?4 AND COALESCE(json_extract(j.data,'$.status'),json_extract(e.data,'$.status')) IN ('QUEUED','RUNNING','SUCCEEDED') AND NOT EXISTS(SELECT 1 FROM deleted_entities d WHERE d.id=e.id OR d.id=e.project_id) ORDER BY e.rowid ASC LIMIT 1",
+                params![input.project_id,input.character_id,motion.as_str(),facing.as_str()], |r| r.get(0),
+            ).optional().map_err(ApiError::storage)?;
+            if let Some(data) = found {
+                let clip: Animation = serde_json::from_str(&data).map_err(ApiError::storage)?;
+                entries.push(AnimationSetEntry {
+                    motion: config.motion,
+                    direction,
+                    animation_id: clip.id,
+                    is_reused: true,
+                });
+                continue;
+            }
+            let (job, is_new) = Self::claim_job_in(&tx, request)?;
+            let config = job.request.animation.clone().unwrap();
+            let clip = Animation {
+                id: job.id.clone(),
+                project_id: job.project_id.clone(),
+                character_id: job.request.character_id.clone(),
+                job_id: Some(job.id.clone()),
+                source_asset_id: job.asset_ids.first().cloned(),
+                config,
+                status: job.status,
+                frames: vec![],
+                preview_path: None,
+                error: job.error.clone(),
+                created_at: job.created_at,
+            };
+            tx.execute(
+                "INSERT INTO entities(id,kind,project_id,data) VALUES(?1,'animation',?2,?3)",
+                params![
+                    clip.id,
+                    clip.project_id,
+                    serde_json::to_string(&clip).map_err(ApiError::storage)?
+                ],
+            )
+            .map_err(ApiError::storage)?;
+            entries.push(AnimationSetEntry {
+                motion: clip.config.motion,
+                direction,
+                animation_id: clip.id,
+                is_reused: false,
+            });
+            if is_new {
+                new_jobs.push(job);
+            }
+        }
+        let set = AnimationSet {
+            id: id(),
+            project_id: input.project_id.clone(),
+            character_id: input.character_id.clone(),
+            job_ids: entries
+                .iter()
+                .filter(|e| !e.is_reused)
+                .map(|e| e.animation_id.clone())
+                .collect(),
+            entries,
+            created_at: now(),
+        };
+        let data = serde_json::to_string(&set).map_err(ApiError::storage)?;
+        tx.execute(
+            "INSERT INTO effects(intent_key,request_hash,response) VALUES(?1,?2,?3)",
+            params![key, hash, data],
+        )
+        .map_err(ApiError::storage)?;
+        tx.execute(
+            "INSERT INTO entities(id,kind,project_id,data) VALUES(?1,'animation_set',?2,?3)",
+            params![set.id, set.project_id, data],
+        )
+        .map_err(ApiError::storage)?;
+        tx.commit().map_err(ApiError::storage)?;
+        Ok((set, new_jobs))
+    }
+
     fn claim_job_in(tx: &rusqlite::Transaction<'_>, request: GenerateInput) -> Result<(Job, bool)> {
         let hash = format!(
             "{:x}",

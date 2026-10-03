@@ -170,7 +170,7 @@ impl Service {
                     Ok(json!({"isReady":true}))
                 }
                 "system/info" => Ok(
-                    json!({"apiVersion":1,"version":env!("CARGO_PKG_VERSION"),"dataDir":self.store.root,"transport":"stdio","capabilities":["2D","STYLE_REFERENCES","CHARACTER_REFERENCES","PNG_EXPORT","CANCELLATION","STYLE_PRESETS","AI_GUIDE","SPRITE_ANIMATION","ANIMATION_ZIP_EXPORT","SUBJECT_LIBRARY"]}),
+                    json!({"apiVersion":1,"version":env!("CARGO_PKG_VERSION"),"dataDir":self.store.root,"transport":"stdio","capabilities":["2D","STYLE_REFERENCES","CHARACTER_REFERENCES","PNG_EXPORT","CANCELLATION","STYLE_PRESETS","AI_GUIDE","SPRITE_ANIMATION","ANIMATION_ZIP_EXPORT","SUBJECT_LIBRARY","DIRECTIONAL_ANIMATION_SETS"]}),
                 ),
                 "account/read" => encode(self.codex().await?.account().await?),
                 "account/login/start" => encode(self.codex().await?.login().await?),

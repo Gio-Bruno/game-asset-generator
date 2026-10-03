@@ -1,4 +1,5 @@
 pub mod animation;
+mod animation_set;
 mod assistant;
 mod batch;
 mod codex;

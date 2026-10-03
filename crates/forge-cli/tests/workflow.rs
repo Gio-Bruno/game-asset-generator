@@ -90,6 +90,112 @@ impl Drop for Api {
 }
 
 #[test]
+fn guide_full_animation_set_answers_coverage_then_renders_every_motion_and_facing() {
+    for skipped in [false, true] {
+        let mut api = Api::new("guide-animation-set");
+        let project = api.project();
+        let character = api.call(
+            "characters/create",
+            json!({"projectId":project,"name":"Fiend","description":"Horned isometric demon"}),
+        )["result"]["id"]
+            .clone();
+        let started=api.call("assistant/message",json!({"requestId":"all-basic","projectId":project,"message":"Create all basic Diablo-like animations for Fiend","allowGeneration":true}))["result"].clone();
+        let id = started["id"].as_str().unwrap();
+        let question = api.wait_guide(id);
+        assert!(question["pendingQuestion"].is_object());
+        assert_eq!(
+            api.call("jobs/list", json!({"projectId":project}))["result"]["pagination"]["totalItems"],
+            0
+        );
+        api.answer_setup(&question, skipped);
+        let done = api.wait_guide(id);
+        assert_eq!(done["status"], "READY", "{done}");
+        assert_eq!(done["turnJobCount"], 40);
+        let jobs = done["generatedJobIds"].as_array().unwrap();
+        assert_eq!(jobs.len(), 40);
+        for id in jobs {
+            assert_eq!(api.wait(id.as_str().unwrap())["status"], "SUCCEEDED");
+        }
+        let clips = api.call(
+            "animations/list",
+            json!({"projectId":project,"characterId":character,"pageSize":100}),
+        )["result"]["data"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(clips.len(), 40);
+        let mut cells = std::collections::HashSet::new();
+        for clip in &clips {
+            assert_eq!(clip["characterId"], character);
+            assert_eq!(clip["frames"].as_array().unwrap().len(), 6);
+            assert!(cells.insert((
+                clip["config"]["motion"].as_str().unwrap(),
+                clip["config"]["direction"].as_str().unwrap()
+            )));
+        }
+        let death = clips
+            .iter()
+            .find(|c| c["config"]["motion"] == "DEATH" && c["config"]["direction"] == "SE")
+            .unwrap();
+        assert_eq!(death["config"]["isLooping"], false);
+        let export = api._tmp.path().join("death-se.zip");
+        assert!(
+            api.call("animations/export", json!({"id":death["id"],"path":export}))
+                .get("result")
+                .is_some()
+        );
+        let mut zip = zip::ZipArchive::new(std::fs::File::open(export).unwrap()).unwrap();
+        let mut metadata = String::new();
+        std::io::Read::read_to_string(&mut zip.by_name("animation.json").unwrap(), &mut metadata)
+            .unwrap();
+        let metadata: Value = serde_json::from_str(&metadata).unwrap();
+        assert_eq!(metadata["meta"]["facingDirection"], "SE");
+        let sets = api.call(
+            "animations/sets/list",
+            json!({"projectId":project,"characterId":character}),
+        )["result"]["data"]
+            .clone();
+        assert_eq!(sets.as_array().unwrap().len(), 1);
+    }
+}
+
+#[test]
+fn one_shot_animation_set_waits_for_all_cells_after_partial_failure() {
+    let mut api = Api::new("animation-set-partial");
+    let project = api.project();
+    let character = api.call(
+        "characters/create",
+        json!({"projectId":project,"name":"Fiend","description":"Demon"}),
+    )["result"]["id"]
+        .clone();
+    let request = json!({"projectId":project,"characterId":character,"idempotencyKey":"partial-set","motions":["ATTACK","DEATH"],"directions":["E","W"],"frameSize":16});
+    api.child.kill().unwrap();
+    api.child.wait().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_asset-forge"))
+        .arg("--data-dir")
+        .arg(api._tmp.path().join("data"))
+        .args(["call", "animations/sets/create"])
+        .arg(request.to_string())
+        .env("ASSET_FORGE_CODEX", api._tmp.path().join("codex"))
+        .env("FORGE_TEST_MODE", "animation-set-partial")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let jobs = result["result"]["jobs"].as_array().unwrap();
+    assert_eq!(jobs.len(), 4);
+    assert_eq!(jobs.iter().filter(|j| j["status"] == "FAILED").count(), 1);
+    assert_eq!(
+        jobs.iter().filter(|j| j["status"] == "SUCCEEDED").count(),
+        3
+    );
+}
+
+#[test]
 fn guide_batch_creates_independent_named_assets_and_replays_once() {
     let mut api = Api::new("guide-batch");
     let project = api.project();

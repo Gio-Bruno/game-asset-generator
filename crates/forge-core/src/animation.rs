@@ -16,6 +16,59 @@ use std::{
     path::Path,
 };
 
+pub const ALL_DIRECTIONS: [FacingDirection; 8] = [
+    FacingDirection::North,
+    FacingDirection::Northeast,
+    FacingDirection::East,
+    FacingDirection::Southeast,
+    FacingDirection::South,
+    FacingDirection::Southwest,
+    FacingDirection::West,
+    FacingDirection::Northwest,
+];
+
+pub fn facing_label(direction: FacingDirection) -> &'static str {
+    match direction {
+        FacingDirection::North => "North (N)",
+        FacingDirection::Northeast => "Northeast (NE)",
+        FacingDirection::East => "East (E)",
+        FacingDirection::Southeast => "Southeast (SE)",
+        FacingDirection::South => "South (S)",
+        FacingDirection::Southwest => "Southwest (SW)",
+        FacingDirection::West => "West (W)",
+        FacingDirection::Northwest => "Northwest (NW)",
+    }
+}
+
+fn facing_instruction(direction: FacingDirection) -> &'static str {
+    match direction {
+        FacingDirection::North => {
+            "FACING N: away from the viewer toward screen top; show the character's back in every frame."
+        }
+        FacingDirection::Northeast => {
+            "FACING NE: away from the viewer toward screen upper-right; show the back/right-facing three-quarter view in every frame."
+        }
+        FacingDirection::East => {
+            "FACING E: toward screen right; show the right-facing profile in every frame."
+        }
+        FacingDirection::Southeast => {
+            "FACING SE: toward the viewer and screen lower-right; show the front/right-facing three-quarter view in every frame."
+        }
+        FacingDirection::South => {
+            "FACING S: toward the viewer and screen bottom; show the character's front in every frame."
+        }
+        FacingDirection::Southwest => {
+            "FACING SW: toward the viewer and screen lower-left; show the front/left-facing three-quarter view in every frame."
+        }
+        FacingDirection::West => {
+            "FACING W: toward screen left; show the left-facing profile in every frame."
+        }
+        FacingDirection::Northwest => {
+            "FACING NW: away from the viewer toward screen upper-left; show the back/left-facing three-quarter view in every frame."
+        }
+    }
+}
+
 pub fn motion_label(motion: Motion) -> &'static str {
     match motion {
         Motion::Idle => "Idle",
@@ -23,6 +76,8 @@ pub fn motion_label(motion: Motion) -> &'static str {
         Motion::Run => "Run",
         Motion::Jump => "Jump",
         Motion::Attack => "Attack",
+        Motion::HitReaction => "Hit reaction",
+        Motion::Death => "Death",
         Motion::Custom => "Custom",
     }
 }
@@ -34,7 +89,10 @@ pub fn defaults(style: &StyleGuide, motion: Motion) -> AnimationConfig {
         frame_width: size / 2,
         frame_height: size / 2,
         fps: if motion == Motion::Run { 12 } else { 8 },
-        is_looping: !matches!(motion, Motion::Jump | Motion::Attack),
+        is_looping: !matches!(
+            motion,
+            Motion::Jump | Motion::Attack | Motion::HitReaction | Motion::Death
+        ),
         ..AnimationConfig::default()
     }
 }
@@ -44,16 +102,22 @@ pub fn motion_direction(motion: Motion) -> &'static str {
             "A calm idle cycle: subtle breathing, weight shift, then return to the opening pose."
         }
         Motion::Walk => {
-            "A complete side-view walk cycle, facing right: contact, down, passing, opposite contact, opposite down, opposite passing. Alternate the leading leg; feet share a stable ground line."
+            "A complete walk cycle: contact, down, passing, opposite contact, opposite down, opposite passing. Alternate the leading leg; feet share a stable ground line. Walk in place in the specified facing, with the saved game's camera and perspective."
         }
         Motion::Run => {
-            "A complete side-view run cycle, facing right: contact, compression, flight, opposite contact, opposite compression, opposite flight. Distinct leg and arm poses with a stable center."
+            "A complete run cycle: contact, compression, flight, opposite contact, opposite compression, opposite flight. Distinct leg and arm poses with a stable center. Run in place in the specified facing, with the saved game's camera and perspective."
         }
         Motion::Jump => {
             "A single jump: neutral, anticipation crouch, takeoff, apex, descent, landing. Keep the character centered horizontally; preserve the vertical arc within every cell."
         }
         Motion::Attack => {
             "A single attack: neutral, anticipation, windup, strike, follow-through, recovery. Maintain the same facing direction and weapon identity."
+        }
+        Motion::HitReaction => {
+            "A single hit reaction: neutral, impact, recoil, stagger, regain balance, return to neutral. Maintain the specified facing and the saved character identity."
+        }
+        Motion::Death => {
+            "A single death sequence: standing, impact, loss of balance, collapse, settling, motionless final pose. End collapsed and remain down; do not stand back up or loop to the opening pose. Keep the complete fallen body inside each cell."
         }
         Motion::Custom => {
             "Follow the user's motion brief as an ordered sequence of distinct poses."
@@ -62,9 +126,10 @@ pub fn motion_direction(motion: Motion) -> &'static str {
 }
 pub(crate) fn sheet_direction(config: &AnimationConfig) -> String {
     format!(
-        "SPRITE ANIMATION: {}. {}\nExactly {} sequential frames in a {} column × {} row grid. Read left to right, top to bottom. Every cell is {} × {} target pixels. No gutters, borders, labels, shadows outside the cell, or frame numbers. Leave trailing cells empty. Keep identical character scale, camera, face, costume, palette and pivot across all frames. Place each character at the center of its cell with a shared foot baseline at 85% of the cell height. Reserve at least 10% fully transparent padding on ALL FOUR sides of EVERY cell. The entire character, feet, weapon and effects must fit inside the central 80% of its cell; choose one scale that fits the widest attack pose and use that scale throughout. Never let pixels cross or touch cell boundaries. Poses must visibly advance through the motion; do not repeat a static portrait. Render one transparent atlas, not separate images. The clip plays at {} FPS; {}.",
+        "SPRITE ANIMATION: {}. {}\n{}\nExactly {} sequential frames in a {} column × {} row grid. Read left to right, top to bottom. Every cell is {} × {} target pixels. No gutters, borders, labels, shadows outside the cell, or frame numbers. Leave trailing cells empty. Keep identical character scale, camera, face, costume, palette and pivot across all frames. Place each character at the center of its cell with a shared ground pivot at 85% of the cell height. Reserve at least 10% fully transparent padding on ALL FOUR sides of EVERY cell. The entire character, feet, weapon and effects must fit inside the central 80% of its cell; choose one scale that fits the widest attack or fallen pose and use that scale throughout. Never let pixels cross or touch cell boundaries. Poses must visibly advance through the motion; do not repeat a static portrait. Render one transparent atlas, not separate images. The clip plays at {} FPS; {}.",
         config.name,
         motion_direction(config.motion),
+        config.direction.map(facing_instruction).unwrap_or("Preserve the saved reference's facing and the game's camera. This clip has no explicit directional coverage."),
         config.frame_count,
         config.columns,
         config.rows(),
@@ -73,6 +138,8 @@ pub(crate) fn sheet_direction(config: &AnimationConfig) -> String {
         config.fps,
         if config.is_looping {
             "last pose must transition smoothly into the first"
+        } else if config.motion == Motion::Death {
+            "finish motionless on the ground and hold the final pose"
         } else {
             "finish in a clear recovery pose"
         }
@@ -94,8 +161,21 @@ impl Service {
                 Motion::Run,
                 Motion::Jump,
                 Motion::Attack,
+                Motion::HitReaction,
+                Motion::Death,
                 Motion::Custom
             ])),
+            "animations/directions/list" => Ok(json!(ALL_DIRECTIONS)),
+            "animations/sets/create" => encode(self.create_animation_set(parse(params)?).await?),
+            "animations/sets/get" => {
+                let p: AnimationId = parse(params)?;
+                encode(self.store.get::<AnimationSet>("animation_set", &p.id)?)
+            }
+            "animations/sets/list" => {
+                let p: MediaListInput = parse(params)?;
+                self.validate_media_list(&p)?;
+                encode(self.store.list_media::<AnimationSet>("animation_set", &p)?)
+            }
             "animations/create" => {
                 let p: CreateAnimation = parse(params)?;
                 p.config.validate()?;
@@ -645,7 +725,7 @@ fn export_zip(clip: &Animation, atlas: &Asset, path: &Path) -> Result<()> {
                 .map_err(ApiError::storage)?;
         }
         let frames: Vec<Value> = clip.frames.iter().map(|f|json!({"filename":format!("frames/frame-{:03}.png",f.index),"frame":f.rect,"rotated":false,"trimmed":false,"spriteSourceSize":{"x":0,"y":0,"w":f.rect.w,"h":f.rect.h},"sourceSize":{"w":f.rect.w,"h":f.rect.h},"duration":(1000.0/clip.config.fps as f64).round() as u32})).collect();
-        let metadata = json!({"frames":frames,"meta":{"app":"Asset Forge","version":1,"image":"atlas.png","format":"RGBA8888","size":{"w":atlas.width,"h":atlas.height},"scale":"1","frameTags":[{"name":clip.config.name,"from":0,"to":clip.config.frame_count-1,"direction":"forward"}],"fps":clip.config.fps,"loop":clip.config.is_looping,"motion":clip.config.motion,"pivot":{"x":0.5,"y":1.0},"characterId":clip.character_id,"projectId":clip.project_id}});
+        let metadata = json!({"frames":frames,"meta":{"app":"Asset Forge","version":1,"image":"atlas.png","format":"RGBA8888","size":{"w":atlas.width,"h":atlas.height},"scale":"1","frameTags":[{"name":clip.config.name,"from":0,"to":clip.config.frame_count-1,"direction":"forward"}],"fps":clip.config.fps,"loop":clip.config.is_looping,"motion":clip.config.motion,"facingDirection":clip.config.direction,"pivot":{"x":0.5,"y":1.0},"characterId":clip.character_id,"projectId":clip.project_id}});
         archive
             .start_file("animation.json", options)
             .map_err(ApiError::storage)?;

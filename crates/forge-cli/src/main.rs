@@ -93,7 +93,7 @@ async fn run(cli: Cli) -> Result<()> {
                     "{}",
                     json!({"result":service.dispatch("animations/get",json!({"id":id})).await?})
                 );
-            } else if method == "jobs/batch/create" {
+            } else if method == "jobs/batch/create" || method == "animations/sets/create" {
                 let ids: Vec<String> =
                     serde_json::from_value(value["jobIds"].clone()).map_err(ApiError::storage)?;
                 let jobs = wait_jobs(&service, &ids).await?;

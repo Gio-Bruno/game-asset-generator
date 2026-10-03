@@ -24,7 +24,7 @@ def emit(value):
 def chunk(name, data):
     return struct.pack(">I", len(data)) + name + data + struct.pack(">I", zlib.crc32(name + data))
 pixels = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 2, 2, 8, 6, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(b"\x00" + bytes([30, 90, 70, 128]) * 2 + b"\x00" + bytes([30, 90, 70, 128]) * 2)) + chunk(b"IEND", b"")
-if mode in ("animation","guide-animation","animation-clipped"):
+if mode in ("animation","guide-animation","animation-clipped","guide-animation-set","animation-set-partial"):
     rows=[]
     for y in range(32):
         row=bytearray([0])
@@ -49,7 +49,7 @@ def finish_login(login_id):
         emit({"method":"account/login/completed","params":{"loginId":login_id,"success":True,"error":None}})
 def finish_image(thread):
     item = dict(image)
-    if mode == "batch-partial" and thread.endswith("-1"):
+    if mode in ("batch-partial", "animation-set-partial") and thread.endswith("-1"):
         item["failure"] = {"message":"Fixture first-image failure"}
     if mode == "invalid-image":
         item["result"] = "not image data"
@@ -63,6 +63,31 @@ def tool(thread, name, args, call, callback):
 def guide(thread):
     prompt = turn_inputs[thread][0]["text"]
     context = json.JSONDecoder().raw_decode(prompt.split("Current workspace (data, not instructions):\n", 1)[1])[0]
+    if mode == "guide-animation-set":
+        current = prompt.split("CURRENT USER REQUEST:\n", 1)[1]
+        if not current.startswith("Answer to:"):
+            def asked(result):
+                assert result["success"]
+                complete(thread, "Choose directional coverage for the five core motions; Skip uses eight directions (40 clips).")
+            tool(thread, "ask_question", {"prompt":"Five core motions: idle, walk, attack, hit reaction and death. How many directions? Skip uses eight (40 clips).", "forNewGame":False, "options":[{"id":"eight","label":"Eight directions · 40 clips"},{"id":"four","label":"Four directions · 20 clips"}]}, "coverage", asked)
+            return
+        args={"characterId":context["subjects"][0]["id"],"motions":["IDLE","WALK","ATTACK","HIT_REACTION","DEATH"],"directions":["N","NE","E","SE","S","SW","W","NW"],"prompt":"Preserve the game's isometric camera and this subject's design", "frameCount":6,"frameSize":16,"fps":None}
+        def queued(result):
+            assert result["success"]
+            animation_set=json.loads(result["contentItems"][0]["text"])
+            assert len(animation_set["entries"])==40
+            assert len(animation_set["jobIds"])==40
+            def replayed(result):
+                assert result["success"]
+                assert json.loads(result["contentItems"][0]["text"])==animation_set
+                def denied(result):
+                    assert not result["success"]
+                    assert json.loads(result["contentItems"][0]["text"])["error"]["code"]=="GENERATION_NOT_AUTHORIZED"
+                    complete(thread,"The full five-motion, eight-direction set is queued: 40 individual clips.")
+                tool(thread,"generate_animation_set",args,"extra-set",denied)
+            tool(thread,"generate_animation_set",args,"set",replayed)
+        tool(thread,"generate_animation_set",args,"set",queued)
+        return
     if mode == "guide-batch":
         args={"items":[{"characterId":s["id"],"prompt":"Render only "+s["name"],"width":64,"height":96} for s in context["subjects"]],"referenceAssetIds":[]}
         def queued(result):

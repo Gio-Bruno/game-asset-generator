@@ -58,6 +58,8 @@ pub struct Studio {
     follow_new_clips: bool,
     guide_started_at: u64,
     ready_jobs: HashSet<String>,
+    collection_jobs: HashSet<String>,
+    collection_focus_job: Option<String>,
     view: View,
     filter: Filter,
     asset_page: usize,
@@ -129,6 +131,8 @@ impl Studio {
             follow_new_clips: false,
             guide_started_at: 0,
             ready_jobs: HashSet::new(),
+            collection_jobs: HashSet::new(),
+            collection_focus_job: None,
             view: View::Library,
             filter: Filter::All,
             asset_page: 1,
@@ -290,6 +294,8 @@ impl Studio {
         self.animation_id = None;
         self.animations_loaded = false;
         self.ready_jobs.clear();
+        self.collection_jobs.clear();
+        self.collection_focus_job = None;
         self.job = None;
         self.active_jobs.clear();
         self.asset_page = 1;
@@ -911,6 +917,7 @@ impl Studio {
                         .iter()
                         .find(|clip| {
                             self.follow_new_clips
+                                && !self.collection_jobs.contains(&clip.id)
                                 && clip.created_at >= self.guide_started_at
                                 && !self.animation_cache.contains_key(&clip.id)
                                 && (self.animations_loaded || self.guide_busy())
@@ -940,6 +947,13 @@ impl Studio {
                     if Some(job.project_id.as_str()) != self.project_id().as_deref() {
                         return;
                     }
+                    let collection = self.collection_jobs.contains(&job.id)
+                        || job.request.idempotency_key.starts_with("animation-set:");
+                    if self.collection_focus_job.as_ref() == Some(&job.id) {
+                        self.collection_focus_job = None;
+                        self.choose_subject(job.request.character_id.clone(), cx);
+                        self.follow_new_clips = false;
+                    }
                     self.active_jobs.retain(|j| j.id != job.id);
                     if !job.status.is_terminal() {
                         self.active_jobs.push(job.clone());
@@ -947,13 +961,15 @@ impl Studio {
                     if let Some(id) = job.asset_ids.first()
                         && self.ready_jobs.insert(job.id.clone())
                     {
-                        self.subject_id = job.request.character_id.clone();
+                        if !collection {
+                            self.subject_id = job.request.character_id.clone();
+                        }
                         if let Some(subject) = &job.character_snapshot {
                             self.subject_cache
                                 .insert(subject.id.clone(), subject.clone());
                         }
                         self.send("assets/get", json!({"id":id}));
-                        if job.request.animation.is_some() {
+                        if !collection && job.request.animation.is_some() {
                             self.animation_id = Some(job.id.clone());
                             self.selected = None;
                             self.show_atlas = false;
@@ -961,15 +977,17 @@ impl Studio {
                             self.play_started = Instant::now();
                             self.frame_index = 0;
                             self.send("animations/get", json!({"id":job.id}));
-                        } else {
+                        } else if !collection {
                             self.selected = Some(id.clone());
                             self.animation_id = None;
                         }
-                        self.asset_page = 1;
-                        self.animation_page = 1;
+                        if !collection {
+                            self.asset_page = 1;
+                            self.animation_page = 1;
+                            self.view = View::Library;
+                            self.filter = Filter::All;
+                        }
                         self.refresh();
-                        self.view = View::Library;
-                        self.filter = Filter::All;
                     }
                     if let Some(error) = &job.error {
                         self.message(&error.message, true, cx);
@@ -1009,6 +1027,15 @@ impl Studio {
                             .update(cx, |input, cx| input.set_value("", window, cx));
                     }
                     let project = session.project_id.clone();
+                    if session.turn_job_count > 1 {
+                        let start = session
+                            .generated_job_ids
+                            .len()
+                            .saturating_sub(session.turn_job_count as usize);
+                        self.collection_jobs
+                            .extend(session.generated_job_ids[start..].iter().cloned());
+                        self.follow_new_clips = false;
+                    }
                     let job = session
                         .generated_job_ids
                         .last()
@@ -1016,6 +1043,9 @@ impl Studio {
                             self.guide.as_ref().and_then(|g| g.generated_job_ids.last()) != Some(id)
                         })
                         .cloned();
+                    if session.turn_job_count > 1 && job.is_some() {
+                        self.collection_focus_job = job.clone();
+                    }
                     if session.status != AssistantStatus::Thinking {
                         self.guide_stream.clear();
                     }
@@ -1038,6 +1068,17 @@ impl Studio {
                     && self.guide.is_none()
                 {
                     self.guide = page.data.into_iter().next();
+                    if let Some(guide) = &self.guide
+                        && guide.turn_job_count > 1
+                    {
+                        let start = guide
+                            .generated_job_ids
+                            .len()
+                            .saturating_sub(guide.turn_job_count as usize);
+                        self.collection_jobs
+                            .extend(guide.generated_job_ids[start..].iter().cloned());
+                        self.follow_new_clips = false;
+                    }
                     self.guide_scroll_pending = true;
                     if let Some(guide) = &self.guide
                         && guide.status == AssistantStatus::Thinking
@@ -1634,11 +1675,19 @@ impl Studio {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .child(div().text_sm().child(if job.status == JobStatus::Running {
-                        "Rendering a new asset…"
-                    } else {
-                        "A new asset is queued…"
-                    }))
+                    .child(div().text_sm().child(format!(
+                            "{} · {}",
+                            job.request
+                                .animation
+                                .as_ref()
+                                .map(|c| c.name.as_str())
+                                .unwrap_or("New asset"),
+                            if job.status == JobStatus::Running {
+                                "Rendering…"
+                            } else {
+                                "Queued"
+                            }
+                        )))
                     .child(
                         Button::new(SharedString::from(format!("cancel-{id}")))
                             .label("Cancel")

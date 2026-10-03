@@ -229,7 +229,7 @@ impl GenerateInput {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Motion {
     #[default]
@@ -238,7 +238,29 @@ pub enum Motion {
     Run,
     Jump,
     Attack,
+    HitReaction,
+    Death,
     Custom,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum FacingDirection {
+    #[serde(rename = "N")]
+    North,
+    #[serde(rename = "NE")]
+    Northeast,
+    #[serde(rename = "E")]
+    East,
+    #[serde(rename = "SE")]
+    Southeast,
+    #[serde(rename = "S")]
+    South,
+    #[serde(rename = "SW")]
+    Southwest,
+    #[serde(rename = "W")]
+    West,
+    #[serde(rename = "NW")]
+    Northwest,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -247,6 +269,9 @@ pub struct AnimationConfig {
     pub name: String,
     #[serde(default)]
     pub motion: Motion,
+    /// Legacy clips have an unspecified facing; names are not authoritative metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direction: Option<FacingDirection>,
     #[serde(default = "six_frames")]
     pub frame_count: u32,
     #[serde(default = "three_columns")]
@@ -284,6 +309,7 @@ impl Default for AnimationConfig {
         Self {
             name: "Idle".into(),
             motion: Motion::Idle,
+            direction: None,
             frame_count: 6,
             columns: 3,
             frame_width: 256,
@@ -344,6 +370,48 @@ pub struct CreateAnimation {
     pub prompt: String,
     #[serde(default)]
     pub reference_asset_ids: Vec<String>,
+}
+
+/// The complete cross product is one generation intent, with one clip per cell.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateAnimationSet {
+    pub project_id: String,
+    pub character_id: String,
+    pub idempotency_key: String,
+    pub motions: Vec<Motion>,
+    pub directions: Vec<FacingDirection>,
+    #[serde(default)]
+    pub prompt: String,
+    #[serde(default)]
+    pub reference_asset_ids: Vec<String>,
+    #[serde(default)]
+    pub frame_count: Option<u32>,
+    #[serde(default)]
+    pub frame_size: Option<u32>,
+    #[serde(default)]
+    pub fps: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnimationSetEntry {
+    pub motion: Motion,
+    pub direction: FacingDirection,
+    pub animation_id: String,
+    pub is_reused: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnimationSet {
+    pub id: String,
+    pub project_id: String,
+    pub character_id: String,
+    pub entries: Vec<AnimationSetEntry>,
+    /// New generation jobs owned by this intent; reused clips are in entries.
+    pub job_ids: Vec<String>,
+    pub created_at: u64,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

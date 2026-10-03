@@ -1987,6 +1987,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "uuid",
+ "zip",
 ]
 
 [[package]]
