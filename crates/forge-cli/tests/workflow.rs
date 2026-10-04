@@ -156,6 +156,57 @@ fn guide_full_animation_set_answers_coverage_then_renders_every_motion_and_facin
         )["result"]["data"]
             .clone();
         assert_eq!(sets.as_array().unwrap().len(), 1);
+        // A full motion/facing set is one directly usable archive, not 40 nested ZIPs.
+        for (method, id) in [
+            ("library/subjects/export", character.clone()),
+            ("animations/sets/export", sets[0]["id"].clone()),
+        ] {
+            let path = api
+                ._tmp
+                .path()
+                .join(format!("{}.zip", method.replace('/', "-")));
+            let result = api.call(method, json!({"id":id,"path":path}));
+            assert_eq!(result["result"]["animationCount"], 40, "{result}");
+            assert_eq!(result["result"]["skippedAnimationCount"], 0);
+            assert_eq!(result["result"]["isComplete"], true);
+            let mut archive = zip::ZipArchive::new(std::fs::File::open(path).unwrap()).unwrap();
+            let mut data = String::new();
+            std::io::Read::read_to_string(
+                &mut archive.by_name("manifest.json").unwrap(),
+                &mut data,
+            )
+            .unwrap();
+            let manifest: Value = serde_json::from_str(&data).unwrap();
+            let mut coverage = std::collections::HashSet::new();
+            for clip in manifest["animations"].as_array().unwrap() {
+                coverage.insert((
+                    clip["motion"].as_str().unwrap(),
+                    clip["facingDirection"].as_str().unwrap(),
+                ));
+                let folder = clip["path"].as_str().unwrap();
+                assert!(archive.by_name(&format!("{folder}/atlas.png")).is_ok());
+                assert!(
+                    archive
+                        .by_name(&format!("{folder}/frames/frame-005.png"))
+                        .is_ok()
+                );
+                let mut data = String::new();
+                std::io::Read::read_to_string(
+                    &mut archive
+                        .by_name(&format!("{folder}/animation.json"))
+                        .unwrap(),
+                    &mut data,
+                )
+                .unwrap();
+                let metadata: Value = serde_json::from_str(&data).unwrap();
+                assert_eq!(metadata["meta"]["facingDirection"], clip["facingDirection"]);
+                if clip["motion"] == "DEATH" {
+                    assert_eq!(metadata["meta"]["loop"], false);
+                }
+            }
+            assert_eq!(coverage.len(), 40);
+            assert!(archive.file_names().all(|name| !name.ends_with(".zip")));
+        }
     }
 }
 

@@ -10,11 +10,7 @@ use image::{
     codecs::gif::{GifEncoder, Repeat},
 };
 use serde_json::{Value, json};
-use std::{
-    fs,
-    io::{Cursor, Write},
-    path::Path,
-};
+use std::{fs, io::Cursor, path::Path};
 
 pub const ALL_DIRECTIONS: [FacingDirection; 8] = [
     FacingDirection::North,
@@ -176,6 +172,7 @@ impl Service {
                 self.validate_media_list(&p)?;
                 encode(self.store.list_media::<AnimationSet>("animation_set", &p)?)
             }
+            "animations/sets/export" => encode(self.export_collection(parse(params)?, true).await?),
             "animations/create" => {
                 let p: CreateAnimation = parse(params)?;
                 p.config.validate()?;
@@ -688,61 +685,9 @@ fn touches_cell_edge(cell: &image::RgbaImage) -> bool {
 }
 
 fn export_zip(clip: &Animation, atlas: &Asset, path: &Path) -> Result<()> {
-    let file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .map_err(|_| {
-            ApiError::new(
-                "EXPORT_ERROR",
-                "Choose a writable ZIP filename that does not already exist.",
-            )
-        })?;
-    let result = (|| -> Result<()> {
-        let mut archive = zip::ZipWriter::new(file);
-        let options =
-            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
-        archive
-            .start_file("atlas.png", options)
-            .map_err(ApiError::storage)?;
-        archive
-            .write_all(&fs::read(&atlas.path).map_err(ApiError::storage)?)
-            .map_err(ApiError::storage)?;
-        for frame in &clip.frames {
-            archive
-                .start_file(format!("frames/frame-{:03}.png", frame.index), options)
-                .map_err(ApiError::storage)?;
-            archive
-                .write_all(&fs::read(&frame.path).map_err(ApiError::storage)?)
-                .map_err(ApiError::storage)?;
-        }
-        if let Some(preview) = &clip.preview_path {
-            archive
-                .start_file("preview.gif", options)
-                .map_err(ApiError::storage)?;
-            archive
-                .write_all(&fs::read(preview).map_err(ApiError::storage)?)
-                .map_err(ApiError::storage)?;
-        }
-        let frames: Vec<Value> = clip.frames.iter().map(|f|json!({"filename":format!("frames/frame-{:03}.png",f.index),"frame":f.rect,"rotated":false,"trimmed":false,"spriteSourceSize":{"x":0,"y":0,"w":f.rect.w,"h":f.rect.h},"sourceSize":{"w":f.rect.w,"h":f.rect.h},"duration":(1000.0/clip.config.fps as f64).round() as u32})).collect();
-        let metadata = json!({"frames":frames,"meta":{"app":"Asset Forge","version":1,"image":"atlas.png","format":"RGBA8888","size":{"w":atlas.width,"h":atlas.height},"scale":"1","frameTags":[{"name":clip.config.name,"from":0,"to":clip.config.frame_count-1,"direction":"forward"}],"fps":clip.config.fps,"loop":clip.config.is_looping,"motion":clip.config.motion,"facingDirection":clip.config.direction,"pivot":{"x":0.5,"y":1.0},"characterId":clip.character_id,"projectId":clip.project_id}});
-        archive
-            .start_file("animation.json", options)
-            .map_err(ApiError::storage)?;
-        archive
-            .write_all(&serde_json::to_vec_pretty(&metadata).map_err(ApiError::storage)?)
-            .map_err(ApiError::storage)?;
-        archive
-            .finish()
-            .map_err(ApiError::storage)?
-            .sync_all()
-            .map_err(ApiError::storage)?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(path);
-    }
-    result
+    crate::export::write_zip(path, |archive| {
+        crate::export::write_clip(archive, "", clip, atlas)
+    })
 }
 
 #[cfg(test)]

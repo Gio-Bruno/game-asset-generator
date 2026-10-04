@@ -251,6 +251,41 @@ impl Store {
         })
     }
 
+    /// One unpaginated snapshot avoids offset shifts while rendering adds media.
+    pub(crate) fn subject_media_for_export(
+        &self,
+        subject: &Character,
+    ) -> Result<crate::export::ExportMedia> {
+        let conn = self.conn.lock().unwrap();
+        let mut query = conn.prepare("SELECT kind,data FROM entities e WHERE kind IN ('asset','animation','animation_set') AND project_id=?1 AND json_extract(data,'$.characterId')=?2 AND NOT EXISTS (SELECT 1 FROM deleted_entities d WHERE d.id=e.id OR d.id=e.project_id) ORDER BY rowid ASC").map_err(ApiError::storage)?;
+        let rows = query
+            .query_map(params![subject.project_id, subject.id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })
+            .map_err(ApiError::storage)?;
+        let mut media = crate::export::ExportMedia {
+            images: vec![],
+            animations: vec![],
+            sets: vec![],
+        };
+        for row in rows {
+            let (kind, data) = row.map_err(ApiError::storage)?;
+            match kind.as_str() {
+                "asset" => media
+                    .images
+                    .push(serde_json::from_str(&data).map_err(ApiError::storage)?),
+                "animation" => media
+                    .animations
+                    .push(serde_json::from_str(&data).map_err(ApiError::storage)?),
+                "animation_set" => media
+                    .sets
+                    .push(serde_json::from_str(&data).map_err(ApiError::storage)?),
+                _ => unreachable!(),
+            }
+        }
+        Ok(media)
+    }
+
     pub fn validate_references(&self, project: &str, references: &[String]) -> Result<Vec<Asset>> {
         references
             .iter()

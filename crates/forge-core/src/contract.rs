@@ -571,6 +571,26 @@ pub struct LibrarySubject {
     pub animation_count: usize,
     pub preview: Option<Asset>,
 }
+
+/// Downloads are local snapshots. An existing destination is never overwritten.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExportCollectionInput {
+    pub id: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionExport {
+    pub path: String,
+    pub character_id: String,
+    pub animation_set_id: Option<String>,
+    pub image_count: usize,
+    pub animation_count: usize,
+    pub skipped_animation_count: usize,
+    pub is_complete: bool,
+}
 fn first_page() -> usize {
     1
 }

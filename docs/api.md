@@ -40,6 +40,7 @@ Match errors using `code`; messages are human-facing. Malformed request envelope
 | `characters/get` | `{id}` | `Character` | Safe |
 | `characters/list` | Pagination + optional `projectId` | `Page<Character>` | Safe |
 | `library/subjects/list` | Pagination + optional `projectId` | `Page<LibrarySubject>`: saved identity, total image/animation counts, optional preview asset | Safe |
+| `library/subjects/export` | `ExportCollectionInput`: `{id, path}`; id is a saved subject | `CollectionExport`; one portable ZIP of the whole visible subject library | Creates a new file; existing target fails; no generation |
 | `characters/update` | `{id, name?, description?, kind?}` | `Character` | Applies only supplied fields; retry the same intended changes |
 | `characters/references/update` | `{id, referenceAssetIds}` | `Character` | Replaces references; retry only the same intended replacement |
 | `assets/import` | `{projectId, path, name, kind?}` | `Asset` | Copies a resource; unsafe to retry automatically |
@@ -54,6 +55,7 @@ Match errors using `code`; messages are human-facing. Malformed request envelope
 | `animations/sets/create` | `CreateAnimationSet` | Complete `AnimationSet` manifest and new job IDs | Idempotent per project and set key; fills missing coverage |
 | `animations/sets/get` | `{id}` | Saved `AnimationSet` | Safe |
 | `animations/sets/list` | Media pagination/filters | `Page<AnimationSet>` | Safe |
+| `animations/sets/export` | `ExportCollectionInput`: `{id, path}`; id is a saved set | `CollectionExport`; one ZIP of exactly that set's clips, atlases and subject references | Creates a new file; existing target fails; no generation |
 | `animations/create` | `CreateAnimation` | `Animation` immediately | Idempotent per project and generation key |
 | `animations/get` | `{id}` | `Animation` with current job status | Safe |
 | `animations/delete` | `{id}` | `Deletion`; source image preserved | Repeated deletion returns `NOT_FOUND` |
@@ -168,6 +170,28 @@ Generated `IDLE` sheets align their planted feet/base after normalization: the b
 `animations/align` applies that same alignment to an existing completed `IDLE` clip, creating a new immutable atlas and clip while preserving the original. It requires an exact complete source grid with zero margin/spacing. It refuses cut art and fails with `ANIMATION_ALIGNMENT_UNAVAILABLE` if translation would clip visible pixels. The new atlas, frame PNGs, GIF and exported rectangles agree. Forge chat exposes this as `align_animation`; no image generation or subscription capacity is used. Alignment fixes translation drift, not inconsistent poses or scale.
 
 `animations/export` creates a ZIP containing `atlas.png`, `frames/frame-000.png` etc., `preview.gif`, and `animation.json`. JSON uses Aseprite-style frame rectangles, source sizes, durations in milliseconds, frame tags, FPS and loop metadata. Coordinates are in atlas pixels; default pivot is normalized `(0.5, 1.0)`. These are portable files rather than an engine-specific importer. PNGs carry full RGBA; GIF uses a limited palette and centisecond timing. The native preview uses PNG frames at the saved FPS.
+
+Collection downloads use the same clip format in a single archive. **Download all** on a subject exports every active owned image and clip across the whole library, plus linked subject references. It ignores the current filter and page. `animations/sets/export` restricts clips to the saved set's entries and includes their atlases and the subject's linked references. Neither operation generates, edits or deletes artwork. Export runs locally and requires no account connection.
+
+```text
+manifest.json
+README.txt
+images/<safe-name>-<id-hash>.png
+references/<safe-name>-<id-hash>.png
+animations/<motion>/<facing>/<safe-name>-<id-hash>/
+  atlas.png
+  frames/frame-000.png ...
+  preview.gif
+  animation.json
+```
+
+Motion folders use lowercase enum names (`idle`, `walk`, `hit_reaction`, etc.); facing folders use `N`, `NE`, `E`, `SE`, `S`, `SW`, `W`, `NW`, or `unspecified` for legacy clips. No facing is inferred from a name. Safe ASCII filenames with stable ID hashes keep same-name revisions distinct and avoid path traversal or Windows-invalid characters. Atlases already included in a clip are mapped to that path instead of duplicated under images. Each clip's JSON paths remain relative to its own folder, so it can also be moved or imported on its own.
+
+`CollectionExport`: `{path, characterId, animationSetId, imageCount, animationCount, skippedAnimationCount, isComplete}`. Counts describe distinct images (including references and atlases) and exported clips. `animationSetId` is null for a whole-subject download. `manifest.json` schema version 1 includes `{schemaVersion, exportedAt, subject, project, animationSetId, images, animations, animationSets, isComplete}`. Project/subject metadata includes the saved names, identity and art direction; source filesystem paths and chat are excluded. Image entries have `{id, name, kind, width, height, hasAlpha, isReference, path}`. Animation entries have `{id, name, motion, facingDirection, status, config, path, skipReason}`; path points to the clip folder. All archive paths are relative.
+
+Only `SUCCEEDED` clips with all configured frames and an atlas are written. Other entries have null paths and an explicit skip reason (`QUEUED`, `RUNNING`, `FAILED`, `CANCELLED`, `UNKNOWN`, `INCOMPLETE_FRAMES_OR_ATLAS`, or `DELETED_OR_MISSING` for a removed set cell). A removed cell also has null status/config; other entries include current authoritative job status and saved playback config. A partial pack returns success with `isComplete:false`; the GUI reports the unfinished count. Download again to a new filename once generation finishes. For whole-subject exports, completeness covers currently active clips; `animationSets` records earlier requested coverage, which can still link removed clips. A set download evaluates every requested cell. When no files are ready, the API returns `VALIDATION_ERROR` without creating an archive. Missing/unreadable source files abort the operation and remove a partial archive; existing destinations remain untouched.
+
+To use a pack, unzip once, then import numbered frame PNGs in order or use each atlas and its JSON rectangles, durations, FPS and loop flag. `README.txt` includes those steps. No nested clip ZIPs or engine-specific setup is required to access the files; configuring playback in a particular engine remains the developer's task.
 
 Forge chooses cell defaults from the style: pixel 128, painterly 512, other styles 256. Six frames/three columns work well with landscape image generation. Run defaults to 12 FPS; Jump, Attack, Hit reaction and Death play once. Developers request changes in chat; the native interface displays the resulting library, world catalog and animation playback, and provides downloads. Direct API callers receive the documented config defaults regardless of project style. `animate --request` and `call animations/create` wait for completion; `serve` returns immediately.
 

@@ -1,5 +1,17 @@
 # Current verification
 
+## 0.1.3 release preparation
+
+Verified on 2026-10-04. The 0.1.3 source includes the subject-grouped Library, complete motion/direction animation sets and Download all collection exports. All 53 macOS tests (35 core and 18 CLI integration tests), formatting and strict workspace/all-targets Clippy pass. Packages must be freshly built from the release source and retain its commit/hash provenance. Full real directional artwork quality and native Windows UI/installer interaction remain unverified.
+
+## Collection downloads after v0.1.2
+
+Verified locally on 2026-10-03. Download all on a saved character, structure, prop or scene exports its whole visible library in one portable ZIP, with separate motion/facing folders, original PNGs and references, atlases, numbered frames, GIF previews, timing JSON, a status manifest and import instructions. The new local API also exports exactly one saved animation set. Individual image/clip downloads retain their existing format.
+
+- All 53 macOS tests pass (35 core and 18 CLI subprocess integration tests), along with formatting and strict workspace/all-targets Clippy. Collection regressions cover 126 distinct images and 105 same-name clips across more than one public list page, path-safe ASCII names, same-name subject isolation, soft deletion, byte-preserved PNGs/frames, FPS/loop/facing metadata, unchanged existing destinations and cleanup after unreadable source frames.
+- The real stdio client against the deterministic Codex fixture exports both the whole subject and the exact requested 40-clip set (five motions × eight directions), with no nested ZIPs. Each cell retains its atlas, six frames and correct facing; death retains non-looping playback. Partial-set tests list failed, queued and removed cells with null paths rather than claiming they are ready, including when the saved clip's status is stale relative to its authoritative job.
+- Full new motion/facing artwork quality and native Windows export interaction remain unverified; these tests validate archive structure, coverage and preservation. Public v0.1.2 distribution artifacts are unchanged.
+
 ## Complete directional animation sets after v0.1.2
 
 Verified locally on 2026-10-03. The previous guide exposed only a single-animation tool and its walk/run defaults forced a right-facing side view. The guide now offers motion/direction choices for broad set requests, then uses one animation-set intent to queue the complete cross product as individual named clips under the existing subject. Hit reaction and Death are additional motion presets; explicit facings retain the game's camera, and death/hit clips play once. Existing unspecified clips remain unchanged.

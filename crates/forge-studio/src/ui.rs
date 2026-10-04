@@ -79,6 +79,7 @@ pub struct Studio {
     name_input: Entity<InputState>,
     renaming: bool,
     management_busy: bool,
+    export_busy: bool,
     last_deletion: Option<Deletion>,
     guide_scroll: ScrollHandle,
     guide_scroll_pending: bool,
@@ -157,6 +158,7 @@ impl Studio {
             name_input: cx.new(|cx| InputState::new(window, cx).placeholder("Game name")),
             renaming: false,
             management_busy: false,
+            export_busy: false,
             last_deletion: None,
             guide_scroll: ScrollHandle::new(),
             guide_scroll_pending: false,
@@ -661,6 +663,9 @@ impl Studio {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if method == "library/subjects/export" {
+            self.export_busy = false;
+        }
         if method == "system/update/ready" {
             self.management_busy = false;
             let result = result.and_then(|_| {
@@ -1120,6 +1125,26 @@ impl Studio {
                 false,
                 cx,
             ),
+            "library/subjects/export" => {
+                if let Ok(export) = serde_json::from_value::<CollectionExport>(data) {
+                    let missing = if export.skipped_animation_count > 0 {
+                        format!(
+                            " {} unfinished clips are listed in manifest.json.",
+                            export.skipped_animation_count
+                        )
+                    } else {
+                        String::new()
+                    };
+                    self.message(
+                        format!(
+                            "Saved {} images and {} clips in one ZIP.{missing}",
+                            export.image_count, export.animation_count
+                        ),
+                        false,
+                        cx,
+                    );
+                }
+            }
             _ => {}
         }
     }
@@ -1295,6 +1320,39 @@ impl Studio {
                     studio.send(method, json!({"id":id,"path":path}))
                 });
             }
+        })
+        .detach();
+    }
+    fn download_subject(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.export_busy {
+            return;
+        }
+        let Some(subject) = self.subject() else {
+            return;
+        };
+        let id = subject.id.clone();
+        let filename = format!(
+            "{}-assets-{}.zip",
+            subject.name.replace(|c: char| !c.is_alphanumeric(), "-"),
+            &id[..8]
+        );
+        let picker = cx.prompt_for_new_path(&forge_core::default_export_dir(), Some(&filename));
+        self.export_busy = true;
+        cx.notify();
+        cx.spawn_in(window, async move |entity, cx| {
+            let path = match picker.await {
+                Ok(Ok(path)) => path,
+                _ => None,
+            };
+            let _ = entity.update_in(cx, |studio, _, cx| {
+                if let Some(path) = path {
+                    studio.message("Packing assets and animations…", false, cx);
+                    studio.send("library/subjects/export", json!({"id":id,"path":path}));
+                } else {
+                    studio.export_busy = false;
+                    cx.notify();
+                }
+            });
         })
         .detach();
     }
@@ -1624,16 +1682,36 @@ impl Studio {
             .child(div().text_sm().text_color(rgb(MUTED)).child(subject.map(|s| s.description.clone()).unwrap_or_else(|| "Concept boards and files for the whole game. Character assets live with their character.".into()))));
         if let Some(subject) = subject {
             let saved = subject.clone();
-            header = header.child(
-                Button::new("subject-chat")
-                    .label("Add to chat")
-                    .small()
-                    .ghost()
-                    .disabled(self.guide_busy())
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.discuss_subject(saved.clone(), window, cx)
-                    })),
-            );
+            header = header
+                .child(
+                    Button::new("subject-chat")
+                        .label("Add to chat")
+                        .small()
+                        .ghost()
+                        .disabled(self.guide_busy())
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.discuss_subject(saved.clone(), window, cx)
+                        })),
+                )
+                .child(
+                    Button::new("subject-download")
+                        .label(if self.export_busy {
+                            "Packing…"
+                        } else {
+                            "Download all"
+                        })
+                        .small()
+                        .primary()
+                        .disabled(
+                            self.export_busy
+                                || (self.asset_total == 0
+                                    && self.animation_total == 0
+                                    && subject.reference_asset_ids.is_empty()),
+                        )
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.download_subject(window, cx)),
+                        ),
+                );
         }
         let mut filters = div().flex().items_center().gap_2();
         for (filter, name) in [
@@ -1651,6 +1729,14 @@ impl Studio {
                         this.filter = filter;
                         cx.notify();
                     })),
+            );
+        }
+        if subject.is_some() {
+            filters = filters.child(div().flex_1()).child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(MUTED))
+                    .child("PNGs, animations & timing in one ZIP"),
             );
         }
         let mut content = div()

@@ -170,7 +170,7 @@ impl Service {
                     Ok(json!({"isReady":true}))
                 }
                 "system/info" => Ok(
-                    json!({"apiVersion":1,"version":env!("CARGO_PKG_VERSION"),"dataDir":self.store.root,"transport":"stdio","capabilities":["2D","STYLE_REFERENCES","CHARACTER_REFERENCES","PNG_EXPORT","CANCELLATION","STYLE_PRESETS","AI_GUIDE","SPRITE_ANIMATION","ANIMATION_ZIP_EXPORT","SUBJECT_LIBRARY","DIRECTIONAL_ANIMATION_SETS"]}),
+                    json!({"apiVersion":1,"version":env!("CARGO_PKG_VERSION"),"dataDir":self.store.root,"transport":"stdio","capabilities":["2D","STYLE_REFERENCES","CHARACTER_REFERENCES","PNG_EXPORT","CANCELLATION","STYLE_PRESETS","AI_GUIDE","SPRITE_ANIMATION","ANIMATION_ZIP_EXPORT","SUBJECT_LIBRARY","DIRECTIONAL_ANIMATION_SETS","COLLECTION_ZIP_EXPORT"]}),
                 ),
                 "account/read" => encode(self.codex().await?.account().await?),
                 "account/login/start" => encode(self.codex().await?.login().await?),
@@ -381,6 +381,9 @@ impl Service {
                 "library/subjects/list" => {
                     let p: ListInput = decode(params)?;
                     encode(self.store.library_subjects(&p)?)
+                }
+                "library/subjects/export" => {
+                    encode(self.export_collection(decode(params)?, false).await?)
                 }
                 "assets/get" => {
                     let p: IdInput = decode(params)?;
