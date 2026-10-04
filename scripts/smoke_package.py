@@ -30,5 +30,5 @@ with tempfile.TemporaryDirectory(prefix="forge-package-smoke-") as temporary:
     project = call("projects/create", {"name": "Packaged workshop", "style": presets[0]["style"]})
     assert call("projects/get", {"id": project["id"]})["name"] == "Packaged workshop"
     motions = call("animations/presets/list", {})
-    assert len(motions) == 6
-    print("Packaged CLI: six styles, six motions, persistent project round trip passed.")
+    assert set(motions) == {"IDLE", "WALK", "RUN", "JUMP", "ATTACK", "HIT_REACTION", "DEATH", "CUSTOM"}
+    print("Packaged CLI: six styles, eight motions, persistent project round trip passed.")

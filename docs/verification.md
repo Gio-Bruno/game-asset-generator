@@ -2,7 +2,9 @@
 
 ## 0.1.3 release preparation
 
-Verified on 2026-10-04. The 0.1.3 source includes the subject-grouped Library, complete motion/direction animation sets and Download all collection exports. All 53 macOS tests (35 core and 18 CLI integration tests), formatting and strict workspace/all-targets Clippy pass. Packages must be freshly built from the release source and retain its commit/hash provenance. Full real directional artwork quality and native Windows UI/installer interaction remain unverified.
+Verified on 2026-10-04. The 0.1.3 source includes the subject-grouped Library, complete motion/direction animation sets and Download all collection exports. All 53 macOS tests (35 core and 18 CLI integration tests), formatting and strict workspace/all-targets Clippy pass. Both optimized platform packages were freshly built from `13d28de363a88a6199eb292c72829eb6ca41f4e1` and retain matching source/hash provenance. Both archives pass CRC, version and binary hashes; the Mac signature and DMG checksum pass. All 34 Windows core tests pass under CrossOver Wine. Packaged CLIs pass isolated persistence/catalog checks, including all eight motions; Windows update readiness and missing helper-plan rejection also pass.
+
+Native Mac verification confirms one Cinder Fiend collection with 6 images and 5 animations. Download all exports 6 images and 4 ready clips in a valid 40-entry ZIP and explicitly lists the failed east clip. Update identifies the app as 0.1.3 and refuses the older published 0.1.2 release. The app is left open on this collection. The package smoke check was updated to expect Hit reaction and Death alongside the six existing motions; this verification-only follow-up does not change the release binaries. Full real directional artwork quality and native Windows UI/installer interaction remain unverified.
 
 ## Collection downloads after v0.1.2
 
